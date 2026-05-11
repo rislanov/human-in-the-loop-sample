@@ -1,0 +1,95 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Booking data";
+}
+
+<section class="booking-shell" data-page="booking-form">
+    <form id="bookingForm" class="booking-form" novalidate>
+        <div class="form-row">
+            <label for="name">Name</label>
+            <input id="name" name="name" type="text" autocomplete="name" required />
+        </div>
+
+        <div class="form-row">
+            <label for="dateOfBirth">Date of birth</label>
+            <div class="control-with-addon date-control">
+                <input id="dateOfBirth" name="dateOfBirth" type="text" inputmode="numeric" placeholder="e.g. 30/01/1990" autocomplete="bday" />
+                <span class="addon calendar-addon" aria-hidden="true"></span>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <label for="numberOfApplicants">Number of applicants</label>
+            <input id="numberOfApplicants" name="numberOfApplicants" type="number" min="1" max="8" value="1" required />
+        </div>
+
+        <div class="form-row">
+            <label for="phoneNumber">Phone number</label>
+            <input id="phoneNumber" name="phoneNumber" type="tel" placeholder="e.g. +3612345678" autocomplete="tel" />
+        </div>
+
+        <div class="form-row">
+            <label for="email">Email address</label>
+            <input id="email" name="email" type="email" autocomplete="email" required />
+        </div>
+
+        <div class="form-row">
+            <label for="reenteredEmail">Re-enter the email address</label>
+            <input id="reenteredEmail" name="reenteredEmail" type="email" autocomplete="email" required />
+        </div>
+
+        <div class="form-row">
+            <label for="passportNumber">Passport number</label>
+            <input id="passportNumber" name="passportNumber" type="text" autocomplete="off" required />
+        </div>
+
+        <div class="form-row">
+            <label for="citizenship">Citizenship</label>
+            <input id="citizenship" name="citizenship" type="text" autocomplete="country-name" required />
+        </div>
+
+        <div class="form-row row-tall">
+            <label for="residencePermit">Serbian residence permit number and validity</label>
+            <input id="residencePermit" name="residencePermit" type="text" autocomplete="off" />
+        </div>
+
+        <div class="form-actions">
+            <p id="formStatus" class="status-line" role="status"></p>
+            <button id="submitBooking" class="primary-button" type="submit">Submit</button>
+        </div>
+    </form>
+</section>
+
+<div id="emailModal" class="modal-layer" hidden>
+    <div class="modal-panel mail-preview" role="dialog" aria-modal="true" aria-labelledby="mailTitle">
+        <button id="closeEmailModal" class="modal-close" type="button" title="Close">x</button>
+        <div class="mail-toolbar">
+            <span></span>
+            <span></span>
+            <span></span>
+        </div>
+        <h1 id="mailTitle">Booking confirmation</h1>
+        <dl class="mail-meta">
+            <div>
+                <dt>To</dt>
+                <dd id="mailTo"></dd>
+            </div>
+            <div>
+                <dt>Subject</dt>
+                <dd id="mailSubject"></dd>
+            </div>
+        </dl>
+        <div class="mail-body">
+            <p>Dear Sir/Madam!</p>
+            <p>Please continue your appointment booking by pressing the button below. The next step will open in a new tab.</p>
+            <p>Please complete the challenge to confirm that this booking request is being made by a person. Be sure that you have entered the correct data. After the third unsuccessful challenge attempt, the system will be blocked and you will not be able to book an appointment.</p>
+            <button id="continueBookingButton" class="mail-action" type="button">Continue Booking</button>
+            <p class="mail-footnote">This is an automatic message. Please do not reply or send an e-mail to this address.</p>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/booking-form.js" asp-append-version="true"></script>
+}
