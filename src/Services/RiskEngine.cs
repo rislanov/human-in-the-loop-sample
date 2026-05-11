@@ -183,6 +183,11 @@ public sealed class RiskEngine
 
     private static (string Decision, string ReasonCode) Decide(int risk, bool accurate, int previousFailures)
     {
+        if (risk >= 90)
+        {
+            return ("hard_denied", "critical_risk");
+        }
+
         if (!accurate)
         {
             return previousFailures >= 2

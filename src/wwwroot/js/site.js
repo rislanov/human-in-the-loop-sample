@@ -1,10 +1,13 @@
 window.bookingApi = (() => {
+  let sessionNonce = "";
+
   async function postJson(url, body) {
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        ...(sessionNonce ? { "X-Booking-Session-Nonce": sessionNonce } : {})
       },
       credentials: "same-origin",
       body: JSON.stringify(body)
@@ -20,6 +23,10 @@ window.bookingApi = (() => {
     return payload;
   }
 
+  function setSessionNonce(nextSessionNonce) {
+    sessionNonce = nextSessionNonce || "";
+  }
+
   function browserSignals() {
     return {
       web_driver: Boolean(navigator.webdriver),
@@ -31,5 +38,5 @@ window.bookingApi = (() => {
     };
   }
 
-  return { postJson, browserSignals };
+  return { postJson, setSessionNonce, browserSignals };
 })();

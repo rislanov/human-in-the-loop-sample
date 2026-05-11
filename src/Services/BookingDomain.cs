@@ -22,6 +22,8 @@ public sealed class BookingIntent
     public required string EmailTicket { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
+    public string? CreatedIpHash { get; init; }
+    public string? CreatedDeviceHash { get; init; }
     public BookingIntentStatus Status { get; set; } = BookingIntentStatus.EmailSent;
     public string? VerificationSessionId { get; set; }
     public int EmailSendCount { get; set; } = 1;
@@ -31,6 +33,18 @@ public sealed class BookingIntent
     public DateTimeOffset? EmailConfirmedAt { get; set; }
     public DateTimeOffset? ChallengePassedAt { get; set; }
     public DateTimeOffset? BookingFinalizedAt { get; set; }
+}
+
+public sealed class VerificationSession
+{
+    public required string Id { get; init; }
+    public required Guid IntentId { get; init; }
+    public required string Nonce { get; init; }
+    public string? IpHash { get; init; }
+    public string? SubnetHash { get; init; }
+    public string? DeviceHash { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
 }
 
 public sealed class BookingData
@@ -67,6 +81,8 @@ public sealed class ValidationGrant
     public required Guid IntentId { get; init; }
     public required string VerificationSessionId { get; init; }
     public required string EmailHash { get; init; }
+    public string? IpHash { get; init; }
+    public string? DeviceHash { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
     public bool Used { get; set; }
@@ -86,9 +102,14 @@ public sealed class AuditEvent
     public required DateTimeOffset Timestamp { get; init; }
     public required string EventType { get; init; }
     public Guid? IntentId { get; init; }
+    public string? EmailHash { get; init; }
     public string? ChallengeId { get; init; }
     public string? RiskBucket { get; init; }
+    public int? RiskScore { get; init; }
     public string? Decision { get; init; }
+    public string? IpHash { get; init; }
+    public string? SubnetHash { get; init; }
+    public string? DeviceHash { get; init; }
     public string? Message { get; init; }
 }
 
@@ -109,11 +130,13 @@ public sealed class CreateBookingIntentRequest
 public sealed class ConfirmEmailRequest
 {
     public string? Ticket { get; init; }
+    public BrowserSignals? Browser { get; init; }
 }
 
 public sealed class InitChallengeRequest
 {
     public string? VerificationSessionId { get; init; }
+    public BrowserSignals? Browser { get; init; }
 }
 
 public sealed class VerifyChallengeRequest
@@ -175,6 +198,7 @@ public sealed class BrowserSignals
 public sealed class AvailableSlotsRequest
 {
     public string? ValidationToken { get; init; }
+    public BrowserSignals? Browser { get; init; }
 }
 
 public sealed class FinalizeBookingRequest
@@ -182,6 +206,7 @@ public sealed class FinalizeBookingRequest
     public string? ValidationToken { get; init; }
     public string? SlotId { get; init; }
     public BookingData? BookingData { get; init; }
+    public BrowserSignals? Browser { get; init; }
 }
 
 public sealed record EmailPreview(
@@ -211,6 +236,15 @@ public sealed record ChallengeVerifyResult(
     string? ReasonCode);
 
 public sealed record FinalizedBooking(string BookingId, BookingSlot Slot);
+
+public sealed record CacheReference(string Value);
+
+public sealed record RequestSecurityContext(
+    string? IpHash,
+    string? SubnetHash,
+    string? DeviceHash,
+    string? SessionNonce,
+    string? UserAgent);
 
 public sealed record StoreResult<T>(bool Success, T? Value, string ErrorCode)
 {

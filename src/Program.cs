@@ -12,6 +12,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<RiskEngine>();
+// Demo-only backing store. Swap this registration for a Redis-backed
+// IDistributedCacheService before running multiple app instances.
+builder.Services.AddSingleton<IDistributedCacheService, InMemoryDistributedCacheService>();
 builder.Services.AddSingleton<BookingFlowStore>();
 builder.Services.AddSingleton<ChallengeAssetRenderer>();
 
@@ -57,7 +60,7 @@ app.MapRazorPages()
 app.MapPost("/api/v1/booking-intents", (CreateBookingIntentRequest request, HttpContext http, BookingFlowStore store) =>
 {
     var baseUrl = $"{http.Request.Scheme}://{http.Request.Host}";
-    var result = store.CreateBookingIntent(request, baseUrl);
+    var result = store.CreateBookingIntent(request, baseUrl, BuildSecurityContext(http, request.Telemetry?.Browser));
 
     return result.Success
         ? Results.Ok(new { Status = "email_sent", DevEmailPreview = result.Value.Preview })
@@ -66,7 +69,7 @@ app.MapPost("/api/v1/booking-intents", (CreateBookingIntentRequest request, Http
 
 app.MapPost("/api/v1/verification/email/confirm", (ConfirmEmailRequest request, HttpContext http, BookingFlowStore store) =>
 {
-    var result = store.ConfirmEmailTicket(request.Ticket);
+    var result = store.ConfirmEmailTicket(request, BuildSecurityContext(http, request.Browser));
     if (!result.Success)
     {
         return Results.BadRequest(new { Error = result.ErrorCode });
@@ -88,14 +91,15 @@ app.MapPost("/api/v1/verification/email/confirm", (ConfirmEmailRequest request, 
     return Results.Ok(new
     {
         Status = "email_confirmed",
-        VerificationSessionId = value.VerificationSessionId
+        VerificationSessionId = value.VerificationSessionId,
+        SessionNonce = value.SessionNonce
     });
 });
 
 app.MapPost("/api/v1/challenge/init", (InitChallengeRequest request, HttpContext http, BookingFlowStore store) =>
 {
     http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
-    var result = store.InitializeChallenge(request.VerificationSessionId, cookieSessionId);
+    var result = store.InitializeChallenge(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
 
     if (!result.Success || result.Value is not { } challenge)
     {
@@ -118,7 +122,7 @@ app.MapGet("/api/v1/challenge/assets/bg/{challengeId}", (string challengeId, Boo
 {
     var result = store.GetChallengeForAsset(challengeId);
     return result.Success && result.Value is not null
-        ? Results.Content(renderer.RenderBackground(result.Value), "image/svg+xml; charset=utf-8")
+        ? Results.Bytes(renderer.RenderBackground(result.Value), "image/png")
         : Results.NotFound();
 });
 
@@ -133,7 +137,7 @@ app.MapGet("/api/v1/challenge/assets/piece/{challengeId}", (string challengeId, 
 app.MapPost("/api/v1/challenge/verify", (VerifyChallengeRequest request, HttpContext http, BookingFlowStore store) =>
 {
     http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
-    var result = store.VerifyChallenge(request, cookieSessionId);
+    var result = store.VerifyChallenge(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
 
     return result.Success && result.Value is not null
         ? Results.Ok(result.Value)
@@ -143,7 +147,7 @@ app.MapPost("/api/v1/challenge/verify", (VerifyChallengeRequest request, HttpCon
 app.MapPost("/api/v1/slots/available", (AvailableSlotsRequest request, HttpContext http, BookingFlowStore store) =>
 {
     http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
-    var result = store.GetAvailableSlots(request.ValidationToken, cookieSessionId);
+    var result = store.GetAvailableSlots(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
 
     if (!result.Success || result.Value is null)
     {
@@ -166,7 +170,7 @@ app.MapPost("/api/v1/slots/available", (AvailableSlotsRequest request, HttpConte
 app.MapPost("/api/v1/bookings/finalize", (FinalizeBookingRequest request, HttpContext http, BookingFlowStore store) =>
 {
     http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
-    var result = store.FinalizeBooking(request, cookieSessionId);
+    var result = store.FinalizeBooking(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
 
     return result.Success && result.Value is not null
         ? Results.Ok(new { Status = "booked", BookingId = result.Value.BookingId })
@@ -176,3 +180,17 @@ app.MapPost("/api/v1/bookings/finalize", (FinalizeBookingRequest request, HttpCo
 app.MapGet("/api/v1/audit/recent", (BookingFlowStore store) => Results.Ok(new { Events = store.GetRecentAuditEvents() }));
 
 app.Run();
+
+static RequestSecurityContext BuildSecurityContext(HttpContext http, BrowserSignals? browser)
+{
+    var nonce = http.Request.Headers.TryGetValue("X-Booking-Session-Nonce", out var nonceValues)
+        ? nonceValues.ToString()
+        : null;
+
+    return new RequestSecurityContext(
+        SecurityHelpers.HashIp(http.Connection.RemoteIpAddress),
+        SecurityHelpers.HashSubnet(http.Connection.RemoteIpAddress),
+        SecurityHelpers.HashDevice(browser),
+        string.IsNullOrWhiteSpace(nonce) ? null : nonce,
+        http.Request.Headers.UserAgent.ToString());
+}

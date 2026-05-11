@@ -127,6 +127,7 @@
       missing_required_fields: "Fill in the required fields.",
       email_mismatch: "Email fields must match.",
       invalid_email: "Enter a valid email address.",
+      email_rate_limited: "A confirmation was already created recently. Try again later.",
       request_failed: "The request could not be completed."
     };
 

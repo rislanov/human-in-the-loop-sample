@@ -1,40 +1,31 @@
-using System.Net;
+using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Security.Cryptography;
 
 namespace HumanLoopBooking.Services;
 
 public sealed class ChallengeAssetRenderer
 {
-    public string RenderBackground(ChallengeSession challenge)
+    public byte[] RenderBackground(ChallengeSession challenge)
     {
         var palette = PaletteFor(challenge.Id);
-        var path = PuzzlePath(challenge.TargetX, challenge.PieceY);
+        var canvas = new PixelCanvas(challenge.Width, challenge.Height);
 
-        return $$"""
-            <svg xmlns="http://www.w3.org/2000/svg" width="{{challenge.Width}}" height="{{challenge.Height}}" viewBox="0 0 {{challenge.Width}} {{challenge.Height}}">
-              <defs>
-                <linearGradient id="sky" x1="0" x2="1" y1="0" y2="1">
-                  <stop offset="0" stop-color="{{palette.Light}}" />
-                  <stop offset="1" stop-color="{{palette.Wash}}" />
-                </linearGradient>
-                <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-                  <path d="M 28 0 L 0 0 0 28" fill="none" stroke="{{palette.Line}}" stroke-width="1" opacity=".38" />
-                </pattern>
-                <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-                  <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#123047" flood-opacity=".22" />
-                </filter>
-              </defs>
-              <rect width="100%" height="100%" rx="8" fill="url(#sky)" />
-              <rect width="100%" height="100%" rx="8" fill="url(#grid)" />
-              <circle cx="58" cy="48" r="31" fill="{{palette.Teal}}" opacity=".74" />
-              <circle cx="306" cy="44" r="34" fill="{{palette.Gold}}" opacity=".72" />
-              <circle cx="286" cy="136" r="28" fill="{{palette.Rose}}" opacity=".68" />
-              <path d="M18 136 C76 84, 112 190, 181 119 S291 72, 342 122" fill="none" stroke="{{palette.Navy}}" stroke-width="12" stroke-linecap="round" opacity=".24" />
-              <path d="M24 78 C93 113, 137 18, 206 54 S284 104, 344 69" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity=".44" />
-              <path d="{{path}}" fill="#f9fbfd" fill-opacity=".9" stroke="#193c57" stroke-opacity=".68" stroke-width="2" stroke-dasharray="5 5" filter="url(#softShadow)" />
-              <path d="{{path}}" fill="none" stroke="#ffffff" stroke-width="4" stroke-opacity=".55" />
-            </svg>
-            """;
+        canvas.Clear(palette.Wash);
+        canvas.FillVerticalGradient(palette.Light, palette.Wash);
+        canvas.DrawGrid(28, palette.Line.WithAlpha(72));
+        canvas.FillCircle(58, 48, 31, palette.Teal.WithAlpha(188));
+        canvas.FillCircle(306, 44, 34, palette.Gold.WithAlpha(184));
+        canvas.FillCircle(286, 136, 28, palette.Rose.WithAlpha(172));
+        canvas.StrokeLine(18, 136, 342, 122, 12, palette.Navy.WithAlpha(58));
+        canvas.StrokeLine(24, 78, 344, 69, 8, Rgba.White.WithAlpha(112));
+
+        canvas.FillPuzzleMask(challenge.TargetX + 2, challenge.PieceY + 5, palette.Navy.WithAlpha(52));
+        canvas.FillPuzzleMask(challenge.TargetX, challenge.PieceY, Rgba.White.WithAlpha(228));
+        canvas.StrokePuzzleMask(challenge.TargetX, challenge.PieceY, palette.Navy.WithAlpha(176));
+        canvas.StrokePuzzleMask(challenge.TargetX - 1, challenge.PieceY - 1, Rgba.White.WithAlpha(112));
+
+        return PngEncoder.EncodeRgba(challenge.Width, challenge.Height, canvas.Pixels);
     }
 
     public string RenderPiece(ChallengeSession challenge)
@@ -46,9 +37,9 @@ public sealed class ChallengeAssetRenderer
             <svg xmlns="http://www.w3.org/2000/svg" width="{{challenge.PieceSize + 16}}" height="{{challenge.PieceSize + 22}}" viewBox="0 0 {{challenge.PieceSize + 16}} {{challenge.PieceSize + 22}}">
               <defs>
                 <linearGradient id="pieceFill" x1="0" x2="1" y1="0" y2="1">
-                  <stop offset="0" stop-color="{{palette.Gold}}" />
-                  <stop offset=".55" stop-color="{{palette.Teal}}" />
-                  <stop offset="1" stop-color="{{palette.Navy}}" />
+                  <stop offset="0" stop-color="{{palette.Gold.Hex}}" />
+                  <stop offset=".55" stop-color="{{palette.Teal.Hex}}" />
+                  <stop offset="1" stop-color="{{palette.Navy.Hex}}" />
                 </linearGradient>
                 <filter id="pieceShadow" x="-35%" y="-35%" width="170%" height="170%">
                   <feDropShadow dx="0" dy="6" stdDeviation="4" flood-color="#0f2434" flood-opacity=".28" />
@@ -72,13 +63,322 @@ public sealed class ChallengeAssetRenderer
         var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(challengeId));
         var palettes = new[]
         {
-            new Palette("#e8f3f1", "#f7fbff", "#10a68e", "#f0bb4c", "#d56a74", "#153b59", "#9bb4c4"),
-            new Palette("#eef4fb", "#fbfaf4", "#3f8fc5", "#e3b448", "#c66889", "#22344d", "#adc1c9"),
-            new Palette("#f0f6ed", "#f8fbff", "#2ba87f", "#e4a747", "#cf6d5f", "#263d58", "#a7b8aa")
+            new Palette(Rgba.FromHex("#e8f3f1"), Rgba.FromHex("#f7fbff"), Rgba.FromHex("#10a68e"), Rgba.FromHex("#f0bb4c"), Rgba.FromHex("#d56a74"), Rgba.FromHex("#153b59"), Rgba.FromHex("#9bb4c4")),
+            new Palette(Rgba.FromHex("#eef4fb"), Rgba.FromHex("#fbfaf4"), Rgba.FromHex("#3f8fc5"), Rgba.FromHex("#e3b448"), Rgba.FromHex("#c66889"), Rgba.FromHex("#22344d"), Rgba.FromHex("#adc1c9")),
+            new Palette(Rgba.FromHex("#f0f6ed"), Rgba.FromHex("#f8fbff"), Rgba.FromHex("#2ba87f"), Rgba.FromHex("#e4a747"), Rgba.FromHex("#cf6d5f"), Rgba.FromHex("#263d58"), Rgba.FromHex("#a7b8aa"))
         };
 
         return palettes[bytes[0] % palettes.Length];
     }
 
-    private sealed record Palette(string Light, string Wash, string Teal, string Gold, string Rose, string Navy, string Line);
+    private sealed record Palette(Rgba Light, Rgba Wash, Rgba Teal, Rgba Gold, Rgba Rose, Rgba Navy, Rgba Line);
+
+    private readonly record struct Rgba(byte R, byte G, byte B, byte A)
+    {
+        public static readonly Rgba White = new(255, 255, 255, 255);
+
+        public string Hex => $"#{R:x2}{G:x2}{B:x2}";
+
+        public Rgba WithAlpha(byte alpha) => this with { A = alpha };
+
+        public static Rgba FromHex(string hex)
+        {
+            return new Rgba(
+                Convert.ToByte(hex[1..3], 16),
+                Convert.ToByte(hex[3..5], 16),
+                Convert.ToByte(hex[5..7], 16),
+                255);
+        }
+    }
+
+    private sealed class PixelCanvas
+    {
+        private const int PieceSize = 48;
+        private const int KnobRadius = 6;
+
+        private readonly int _width;
+        private readonly int _height;
+
+        public PixelCanvas(int width, int height)
+        {
+            _width = width;
+            _height = height;
+            Pixels = new byte[width * height * 4];
+        }
+
+        public byte[] Pixels { get; }
+
+        public void Clear(Rgba color)
+        {
+            for (var y = 0; y < _height; y++)
+            {
+                for (var x = 0; x < _width; x++)
+                {
+                    PutOpaque(x, y, color);
+                }
+            }
+        }
+
+        public void FillVerticalGradient(Rgba top, Rgba bottom)
+        {
+            for (var y = 0; y < _height; y++)
+            {
+                var t = (double)y / Math.Max(1, _height - 1);
+                var color = new Rgba(
+                    Lerp(top.R, bottom.R, t),
+                    Lerp(top.G, bottom.G, t),
+                    Lerp(top.B, bottom.B, t),
+                    255);
+
+                for (var x = 0; x < _width; x++)
+                {
+                    PutOpaque(x, y, color);
+                }
+            }
+        }
+
+        public void DrawGrid(int spacing, Rgba color)
+        {
+            for (var x = spacing; x < _width; x += spacing)
+            {
+                StrokeLine(x, 0, x, _height, 1, color);
+            }
+
+            for (var y = spacing; y < _height; y += spacing)
+            {
+                StrokeLine(0, y, _width, y, 1, color);
+            }
+        }
+
+        public void FillCircle(int centerX, int centerY, int radius, Rgba color)
+        {
+            var radiusSquared = radius * radius;
+            for (var y = centerY - radius; y <= centerY + radius; y++)
+            {
+                for (var x = centerX - radius; x <= centerX + radius; x++)
+                {
+                    var dx = x - centerX;
+                    var dy = y - centerY;
+                    if (dx * dx + dy * dy <= radiusSquared)
+                    {
+                        Blend(x, y, color);
+                    }
+                }
+            }
+        }
+
+        public void StrokeLine(int x1, int y1, int x2, int y2, int width, Rgba color)
+        {
+            var minX = Math.Min(x1, x2) - width;
+            var maxX = Math.Max(x1, x2) + width;
+            var minY = Math.Min(y1, y2) - width;
+            var maxY = Math.Max(y1, y2) + width;
+            var half = width / 2.0;
+
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var x = minX; x <= maxX; x++)
+                {
+                    if (DistanceToSegment(x, y, x1, y1, x2, y2) <= half)
+                    {
+                        Blend(x, y, color);
+                    }
+                }
+            }
+        }
+
+        public void FillPuzzleMask(int x, int y, Rgba color)
+        {
+            for (var py = y - KnobRadius - 1; py <= y + PieceSize + KnobRadius + 1; py++)
+            {
+                for (var px = x - KnobRadius - 1; px <= x + PieceSize + KnobRadius + 1; px++)
+                {
+                    if (InsidePuzzle(px, py, x, y))
+                    {
+                        Blend(px, py, color);
+                    }
+                }
+            }
+        }
+
+        public void StrokePuzzleMask(int x, int y, Rgba color)
+        {
+            for (var py = y - KnobRadius - 2; py <= y + PieceSize + KnobRadius + 2; py++)
+            {
+                for (var px = x - KnobRadius - 2; px <= x + PieceSize + KnobRadius + 2; px++)
+                {
+                    if (!InsidePuzzle(px, py, x, y))
+                    {
+                        continue;
+                    }
+
+                    if (!InsidePuzzle(px - 1, py, x, y) ||
+                        !InsidePuzzle(px + 1, py, x, y) ||
+                        !InsidePuzzle(px, py - 1, x, y) ||
+                        !InsidePuzzle(px, py + 1, x, y))
+                    {
+                        Blend(px, py, color);
+                    }
+                }
+            }
+        }
+
+        private static bool InsidePuzzle(int px, int py, int x, int y)
+        {
+            var lx = px - x;
+            var ly = py - y;
+            var inBase = lx is >= 0 and <= PieceSize && ly is >= 0 and <= PieceSize;
+            var topKnob = DistanceSquared(lx, ly, 24, 0) <= KnobRadius * KnobRadius;
+            var rightKnob = DistanceSquared(lx, ly, PieceSize, 24) <= KnobRadius * KnobRadius;
+            var leftKnob = DistanceSquared(lx, ly, 0, 24) <= KnobRadius * KnobRadius;
+
+            return inBase || topKnob || rightKnob || leftKnob;
+        }
+
+        private void PutOpaque(int x, int y, Rgba color)
+        {
+            if (x < 0 || x >= _width || y < 0 || y >= _height)
+            {
+                return;
+            }
+
+            var index = ((y * _width) + x) * 4;
+            Pixels[index] = color.R;
+            Pixels[index + 1] = color.G;
+            Pixels[index + 2] = color.B;
+            Pixels[index + 3] = 255;
+        }
+
+        private void Blend(int x, int y, Rgba color)
+        {
+            if (x < 0 || x >= _width || y < 0 || y >= _height)
+            {
+                return;
+            }
+
+            var index = ((y * _width) + x) * 4;
+            var alpha = color.A / 255.0;
+            Pixels[index] = (byte)Math.Round((color.R * alpha) + (Pixels[index] * (1 - alpha)));
+            Pixels[index + 1] = (byte)Math.Round((color.G * alpha) + (Pixels[index + 1] * (1 - alpha)));
+            Pixels[index + 2] = (byte)Math.Round((color.B * alpha) + (Pixels[index + 2] * (1 - alpha)));
+            Pixels[index + 3] = 255;
+        }
+
+        private static byte Lerp(byte start, byte end, double t)
+        {
+            return (byte)Math.Round(start + ((end - start) * t));
+        }
+
+        private static int DistanceSquared(int x, int y, int centerX, int centerY)
+        {
+            var dx = x - centerX;
+            var dy = y - centerY;
+            return (dx * dx) + (dy * dy);
+        }
+
+        private static double DistanceToSegment(double px, double py, double x1, double y1, double x2, double y2)
+        {
+            var dx = x2 - x1;
+            var dy = y2 - y1;
+            if (dx == 0 && dy == 0)
+            {
+                return Math.Sqrt(((px - x1) * (px - x1)) + ((py - y1) * (py - y1)));
+            }
+
+            var t = Math.Clamp((((px - x1) * dx) + ((py - y1) * dy)) / ((dx * dx) + (dy * dy)), 0, 1);
+            var projectionX = x1 + (t * dx);
+            var projectionY = y1 + (t * dy);
+            return Math.Sqrt(((px - projectionX) * (px - projectionX)) + ((py - projectionY) * (py - projectionY)));
+        }
+    }
+
+    private static class PngEncoder
+    {
+        private static readonly uint[] CrcTable = BuildCrcTable();
+
+        public static byte[] EncodeRgba(int width, int height, byte[] rgba)
+        {
+            using var stream = new MemoryStream();
+            stream.Write([137, 80, 78, 71, 13, 10, 26, 10]);
+
+            Span<byte> ihdr = stackalloc byte[13];
+            BinaryPrimitives.WriteInt32BigEndian(ihdr[..4], width);
+            BinaryPrimitives.WriteInt32BigEndian(ihdr.Slice(4, 4), height);
+            ihdr[8] = 8;
+            ihdr[9] = 6;
+            ihdr[10] = 0;
+            ihdr[11] = 0;
+            ihdr[12] = 0;
+            WriteChunk(stream, "IHDR", ihdr);
+
+            using var raw = new MemoryStream();
+            var rowLength = width * 4;
+            for (var y = 0; y < height; y++)
+            {
+                raw.WriteByte(0);
+                raw.Write(rgba, y * rowLength, rowLength);
+            }
+
+            using var compressed = new MemoryStream();
+            raw.Position = 0;
+            using (var zlib = new ZLibStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
+            {
+                raw.CopyTo(zlib);
+            }
+
+            WriteChunk(stream, "IDAT", compressed.ToArray());
+            WriteChunk(stream, "IEND", ReadOnlySpan<byte>.Empty);
+            return stream.ToArray();
+        }
+
+        private static void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
+        {
+            Span<byte> length = stackalloc byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(length, data.Length);
+            stream.Write(length);
+
+            var typeBytes = System.Text.Encoding.ASCII.GetBytes(type);
+            stream.Write(typeBytes);
+            stream.Write(data);
+
+            Span<byte> crcBytes = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(crcBytes, Crc(typeBytes, data));
+            stream.Write(crcBytes);
+        }
+
+        private static uint Crc(ReadOnlySpan<byte> type, ReadOnlySpan<byte> data)
+        {
+            var crc = 0xffffffffu;
+            crc = UpdateCrc(crc, type);
+            crc = UpdateCrc(crc, data);
+            return crc ^ 0xffffffffu;
+        }
+
+        private static uint UpdateCrc(uint crc, ReadOnlySpan<byte> bytes)
+        {
+            foreach (var b in bytes)
+            {
+                crc = CrcTable[(crc ^ b) & 0xff] ^ (crc >> 8);
+            }
+
+            return crc;
+        }
+
+        private static uint[] BuildCrcTable()
+        {
+            var table = new uint[256];
+            for (uint n = 0; n < table.Length; n++)
+            {
+                var c = n;
+                for (var k = 0; k < 8; k++)
+                {
+                    c = (c & 1) == 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+                }
+
+                table[n] = c;
+            }
+
+            return table;
+        }
+    }
 }

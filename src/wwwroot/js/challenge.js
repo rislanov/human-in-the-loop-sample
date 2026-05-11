@@ -65,9 +65,11 @@
 
     try {
       const confirmed = await window.bookingApi.postJson("/api/v1/verification/email/confirm", {
-        ticket
+        ticket,
+        browser: window.bookingApi.browserSignals()
       });
       verificationSessionId = confirmed.verification_session_id;
+      window.bookingApi.setSessionNonce(confirmed.session_nonce);
       await initChallenge();
     } catch (error) {
       showFatal(readableError(error.message));
@@ -83,7 +85,8 @@
 
     try {
       const response = await window.bookingApi.postJson("/api/v1/challenge/init", {
-        verification_session_id: verificationSessionId
+        verification_session_id: verificationSessionId,
+        browser: window.bookingApi.browserSignals()
       });
 
       challengeId = response.challenge_id;
@@ -193,6 +196,11 @@
         return;
       }
 
+      if (result.decision === "hard_denied") {
+        showFatal(readableError("hard_denied"));
+        return;
+      }
+
       challengeStatus.textContent = "Try again in a moment.";
       window.setTimeout(initChallenge, (result.cooldown_seconds || 3) * 1000);
     } catch (error) {
@@ -203,7 +211,8 @@
 
   async function showSlots() {
     const response = await window.bookingApi.postJson("/api/v1/slots/available", {
-      validation_token: validationToken
+      validation_token: validationToken,
+      browser: window.bookingApi.browserSignals()
     });
 
     renderSlots(response.slots || []);
@@ -243,7 +252,8 @@
     try {
       const result = await window.bookingApi.postJson("/api/v1/bookings/finalize", {
         validation_token: validationToken,
-        slot_id: slotId
+        slot_id: slotId,
+        browser: window.bookingApi.browserSignals()
       });
       bookingStatus.textContent = `Booking confirmed: ${result.booking_id}`;
       setPhase("confirmation");
@@ -323,10 +333,15 @@
       invalid_verification_session: "Verification session could not be restored.",
       challenge_expired_or_consumed: "Challenge expired.",
       too_many_attempts: "Verification is temporarily unavailable for this request.",
+      hard_denied: "This booking request can no longer continue.",
+      missing_session_nonce: "Booking session could not be verified.",
+      invalid_session_nonce: "Booking session could not be verified.",
+      device_mismatch: "Booking session could not be restored on this device.",
       missing_validation_token: "Slot selection token is missing.",
       invalid_validation_token: "Slot selection token is invalid or expired.",
       validation_token_expired_or_used: "Slot selection token is invalid or expired.",
-      slot_unavailable: "This slot is no longer available."
+      slot_unavailable: "This slot is no longer available.",
+      slot_pressure_cooldown: "This slot group is busy. Try again shortly."
     };
 
     return map[errorCode] || "The request could not be completed.";
