@@ -1,146 +1,1182 @@
-# Design Document: "Human-in-the-Loop" Verification System for Booking Portal
+# Design Document: Bot-Resistant Booking Verification Flow
 
-**Goal:** Complete blocking of automated booking systems (VLM agents) that simulate human actions in a web browser.
+## 1. Goal
 
----
+Build a practical anti-automation layer for a booking portal that increases the cost and reduces the reliability of automated slot booking by:
 
-## 1. Architecture Overview
+- AI agents controlling a real Chrome browser;
+- Selenium/WebDriver scripts;
+- scripted email-link confirmation flows;
+- high-volume attempts against scarce booking slots.
 
-The system combines two-factor intent confirmation (Email) and biometric-like behavioral analysis (Slider Trajectory).
+The system does **not** claim to prove that a user is human. Instead, it evaluates risk across multiple independent signals and allows, challenges, cools down, or denies requests based on that risk.
 
-**Core Components:**
-
-1. **Identity Provider (IdP):** Service for managing sessions and temporary tokens (Ticket Service).
-2. **Captcha Engine:** Generator for visual puzzles and the verification analyzer.
-3. **Telemetry Collector:** Client-side JS module for implicit movement data collection.
-
-
+Accessibility is intentionally out of scope for this document.
 
 ---
 
-## 2. User Journey
+## 2. Non-Goals
 
-### Stage 1: Session Reservation
+The system will not attempt to:
 
-1. The user fills in primary data (Name, Email) on `https://sample-booking-system.com`.
-2. The backend creates a record in Redis: pending_session:{email_hash} with the status AWAITING_EMAIL and a strict TTL (e.g., 15 minutes) to prevent memory exhaustion.
-3. A **Magic Link** is sent to the provided email address:
-`https://sample-booking-system.com/confirm-booking?t=[SIGNED_JWT]`
-*Note: The JWT contains the email, timestamp, nonce, and a server signature.*
-
-### Stage 2: Captcha Activation
-
-1. Upon clicking the link, the frontend extracts `t` (the ticket) and makes a call:
-`POST /api/v1/captcha/init` (Payload: `{ ticket: "[JWT]" }`).
-2. The backend verifies the JWT signature and generates a captcha object:
-* **Background Image:** A random photo from the database.
-* **X_target:** A random coordinate (hidden from the client).
-* **Session_ID:** Cryptographically tied to the ticket.
-
-
-
-### Stage 3: Resolution and Telemetry Collection
-
-1. The user is presented with the slider puzzle.
-2. At the exact moment of interaction (mousedown/touchstart), a timer starts and `mousemove` events begin recording.
-3. Upon releasing the slider (mouseup), the frontend compiles the collected data payload.
+- build a proprietary CAPTCHA from scratch;
+- fully prevent human solver farms;
+- rely on a single browser fingerprint or telemetry signal;
+- use client-side obfuscation as a security boundary;
+- check mailbox age, mailbox freshness, or mailbox ownership quality;
+- reserve or finalize a real booking slot before successful verification.
 
 ---
 
-## 3. Deep Trajectory Analysis (Backend Heuristics)
+## 3. Threat Model
 
-This is the core defense mechanism against AI agents. The backend receives an array of points:
+### 3.1 In Scope
 
-`Track = [{x, y, t}, {x, y, t}, ...]`
+#### AI Agent with Real Chrome
 
-### 3.1. Physical Filters (The Physics Engine)
+An automated agent can:
 
-*Updated to include device-aware routing to prevent mobile users from being falsely flagged as bots.*
+- open the site in a real Chrome browser;
+- inspect the rendered page visually;
+- use screenshots and VLM reasoning;
+- move the mouse or perform touch-like actions;
+- read the magic-link email through mailbox automation;
+- retry challenges and adapt behavior.
 
-For every submission, the backend first determines the **Input Modality** (Mouse vs. Touch) based on the event types (`mousemove` vs. `touchmove`) collected in the telemetry payload. The heuristics are dynamically adjusted based on this modality:
+#### Selenium / WebDriver Script
 
-**A. Mouse Profile (Desktop):**
+A script can:
 
-* **Micro-Jitter Metric (Y-Variance):** Computes the standard deviation along the `Y` axis. Human hands experience natural physiological tremor, resulting in a standard deviation > 0.5 pixels. If $\sigma Y \approx 0$, the request is strictly flagged as `BOT`.
-* **Fitts's Law Velocity Curve:** Evaluates the movement using the acceleration-peak-deceleration model. Bots typically exhibit constant velocity or mathematically perfect Bezier curves without the final "homing in" deceleration phase.
+- automate form filling;
+- click links and buttons;
+- call browser APIs;
+- emulate mouse and keyboard actions;
+- attempt to hide WebDriver markers;
+- replay or synthesize client telemetry.
 
-**B. Touch Profile (Mobile/Tablet):**
+### 3.2 Out of Scope
 
-* **Jitter Exemption:** The `Y-Variance` check is disabled or severely relaxed for touch events, as mobile operating systems apply aggressive hardware-level smoothing to swipe gestures, natively resulting in $\sigma Y \approx 0$.
-* **Swipe Arc & Fitt's Law Adaptation:** Mobile swipes differ from mouse dragging. They typically feature an explosive initial acceleration (flick) followed by a sharp stop, or an arc-like trajectory due to the biomechanics of the thumb. perfectly straight diagonal lines with constant speed are flagged as synthetic.
-* **Touch Surface Metrics:** Validates the presence and organic fluctuation of `Touch.radiusX`, `Touch.radiusY`, and `Touch.force` properties across the event array. Headless browsers (like Puppeteer) emulating touch often send static, hardcoded values (e.g., `radiusX = 1`) or omit them entirely.
+The system does not fully defend against:
 
-**C. Global Temporal Metrics:**
-* *Time Entropy (t-delta):* The intervals between recorded events are analyzed. Bot browser cycles often yield events with suspiciously consistent intervals (e.g., exactly every 16.6ms). Authentic human intervals demonstrate high temporal entropy.
-
-### 3.2. Headless Browser Traps
-
-* **isTrusted Check:** Verification of the native system event flag.
-* **Overlay Trap:** The confirmation button is covered by an invisible transparent layer. A bot will search the DOM and click the button's exact coordinates, while a human will physically click on the transparent layer (triggering the actual event handler).
+- a real human manually completing bookings;
+- paid human CAPTCHA-solving services;
+- compromised legitimate user mailboxes;
+- attackers with full control over residential proxy fleets and large numbers of real devices.
 
 ---
 
-## 4. API Specification (Verification Protocol)
+## 4. Core Design Principles
 
-### Method: `POST /api/v1/captcha/verify`
+1. **Server state is authoritative.**
+   Client telemetry is only a signal, never a source of truth.
 
-**Request Headers:**
+2. **Use existing open-source CAPTCHA/slider components.**
+   Do not build the visual slider engine from scratch unless required for integration or security hardening.
 
-* `X-Captcha-Session-ID`: UUID generated from the Init step.
-* `Content-Type`: `application/json`
+3. **Slider CAPTCHA is not the defense by itself.**
+   It is one challenge signal inside a broader risk engine.
 
-**Request Body (Payload):**
+4. **Every token is scoped, short-lived, and single-purpose.**
+   Email tickets, challenge sessions, and booking validation tokens have different purposes and lifetimes.
+
+5. **Risk-based decisions instead of hard binary rules.**
+   Suspicious telemetry increases risk; it should not automatically block legitimate users.
+
+6. **Mobile is a first-class flow.**
+   Touch input must be supported without strict assumptions about jitter, force, radius, or event density.
+
+7. **No slot is selected or finalized before successful challenge.**
+   Slot selection happens only after verification.
+
+---
+
+## 5. High-Level Architecture
+
+### Components
+
+#### Booking Frontend
+
+Responsible for:
+
+- collecting user form data;
+- displaying the email-confirmation state;
+- rendering the open-source slider challenge;
+- collecting interaction telemetry;
+- submitting challenge verification;
+- allowing slot selection only after verification success.
+
+#### Booking API
+
+Responsible for:
+
+- creating booking-intent records;
+- sending verification emails;
+- enforcing state transitions;
+- issuing and consuming validation tokens;
+- finalizing bookings atomically.
+
+#### Challenge Service
+
+Responsible for:
+
+- integrating with an open-source slider CAPTCHA component;
+- generating challenge sessions;
+- storing challenge metadata server-side;
+- verifying slider solutions;
+- passing challenge telemetry to the risk engine.
+
+#### Risk Engine
+
+Responsible for:
+
+- evaluating browser, session, telemetry, velocity, and abuse signals;
+- producing a risk score;
+- returning one of the allowed decisions:
+  - allow;
+  - allow with cooldown;
+  - require fresh challenge;
+  - temporarily deny;
+  - hard deny for the current ticket/session.
+
+#### Redis / State Store
+
+Responsible for temporary state:
+
+- email ticket state;
+- challenge session state;
+- attempt counters;
+- rate-limit buckets;
+- validation-token state;
+- short-lived risk context.
+
+---
+
+## 6. Open-Source Slider CAPTCHA Strategy
+
+### 6.1 Requirement
+
+The slider challenge must use an existing open-source implementation as the base component.
+
+Acceptable examples include libraries in the following categories:
+
+- React/JavaScript slider CAPTCHA components;
+- Node/Express-compatible slider CAPTCHA backends;
+- mobile-compatible slider CAPTCHA widgets;
+- framework-specific components if they support server-side verification.
+
+### 6.2 Selection Criteria
+
+A candidate library must be evaluated against:
+
+- active maintenance or acceptable fork quality;
+- license compatibility;
+- mobile support;
+- ability to verify solutions server-side;
+- ability to customize challenge images;
+- ability to collect or attach telemetry;
+- ability to avoid exposing the correct answer to the client;
+- minimal dependency risk;
+- compatibility with the existing frontend stack.
+
+### 6.3 Recommended Integration Approach
+
+Use the open-source component for:
+
+- rendering the slider UI;
+- handling pointer/touch interaction;
+- basic solution submission;
+- client-side visual behavior.
+
+Keep the following server-owned:
+
+- challenge id;
+- expected solution;
+- solution tolerance;
+- image/challenge seed;
+- attempt count;
+- expiry;
+- risk context;
+- final pass/fail decision.
+
+The client must never receive the raw target coordinate or any reusable secret that allows offline solving.
+
+### 6.4 Important Limitation
+
+Open-source slider CAPTCHA code is public and can be studied by attackers. Slider CAPTCHA solvers also exist. Therefore, the slider is used as a friction and signal source, not as a complete anti-bot mechanism.
+
+---
+
+## 7. Verification State Machine
+
+The flow is modeled as a server-side state machine.
+
+```text
+FORM_SUBMITTED
+  -> EMAIL_SENT
+  -> EMAIL_CONFIRMED
+  -> CHALLENGE_STARTED
+  -> CHALLENGE_PASSED
+  -> SLOT_SELECTION_ALLOWED
+  -> BOOKING_FINALIZED
+```
+
+Invalid transitions are rejected.
+
+For example:
+
+- a user cannot start a challenge without a valid email ticket;
+- a user cannot select a slot before `CHALLENGE_PASSED`;
+- a validation token cannot be reused;
+- a challenge session cannot be verified twice;
+- a stale email ticket cannot issue new challenges.
+
+---
+
+## 8. End-to-End User Flow
+
+### Stage 1: Form Submission
+
+The user submits initial booking data:
+
+```text
+POST /api/v1/booking-intents
+```
+
+Input:
+
+- name;
+- email;
+- optional booking metadata that is safe to collect before verification.
+
+Server behavior:
+
+1. Normalize the email address.
+2. Create a server-side booking intent.
+3. Generate an opaque email ticket token.
+4. Store ticket state in Redis or another temporary store.
+5. Send a magic link to the email address.
+
+Example Redis record:
+
+```text
+booking_intent:{intent_id}
+  status = EMAIL_SENT
+  email_hash = ...
+  created_at = ...
+  expires_at = ...
+  email_send_count = 1
+  challenge_init_count = 0
+  challenge_fail_count = 0
+  risk_score = initial_score
+```
+
+The email link should contain an opaque token:
+
+```text
+https://sample-booking-system.com/confirm-booking?t=<opaque_email_ticket>
+```
+
+Do not put raw email or sensitive booking data inside the URL.
+
+---
+
+### Stage 2: Email Confirmation
+
+The user opens the magic link.
+
+Frontend calls:
+
+```text
+POST /api/v1/verification/email/confirm
+```
+
+Payload:
 
 ```json
 {
-  "ticket": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "solution": {
-    "x": 184, 
-    "time_spent": 1240
-  },
-  "telemetry": {
-    "modality": "touch", 
-    "points": [
-      {"x": 0, "y": 5, "t": 0, "rX": 1.2, "rY": 1.2, "f": 0.5}, 
-      {"x": 12, "y": 6, "t": 45, "rX": 1.5, "rY": 1.3, "f": 0.6}, 
-      {"x": 184, "y": 5, "t": 1240, "rX": 1.1, "rY": 1.1, "f": 0.4}
-    ],
-    "user_agent": "Mozilla/5.0...",
-    "canvas_fingerprint": "hash_string"
+  "ticket": "opaque_email_ticket"
+}
+```
+
+Server behavior:
+
+1. Look up the ticket server-side.
+2. Validate TTL and state.
+3. Mark the booking intent as `EMAIL_CONFIRMED`.
+4. Create a browser verification session.
+5. Set a secure, HTTP-only, SameSite cookie for the verification session.
+6. Return a short-lived frontend session descriptor.
+
+The email ticket confirms access to the mailbox, but it does not grant booking rights.
+
+---
+
+### Stage 3: Challenge Initialization
+
+Frontend calls:
+
+```text
+POST /api/v1/challenge/init
+```
+
+Server behavior:
+
+1. Validate the email-confirmed booking intent.
+2. Check rate limits and attempt counters.
+3. Compute current risk score.
+4. Select challenge difficulty or variant.
+5. Create a one-time challenge session.
+6. Generate slider challenge data using the selected open-source component or its backend.
+7. Store the expected answer server-side.
+8. Return only render-safe challenge data.
+
+Example response:
+
+```json
+{
+  "challenge_id": "ch_123",
+  "type": "slider",
+  "expires_in_seconds": 120,
+  "render_payload": {
+    "background_image_url": "/api/v1/challenge/assets/bg/ch_123",
+    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123",
+    "ui_config": {
+      "width": 320,
+      "height": 160
+    }
   }
 }
 ```
 
-**Response (Success):**
+The response must not include:
+
+- raw `x_target`;
+- solution hash that can be brute-forced locally;
+- reusable signing secrets;
+- long-lived identifiers.
+
+---
+
+### Stage 4: Challenge Interaction and Telemetry
+
+The frontend renders the open-source slider component and collects lightweight telemetry.
+
+Telemetry may include:
+
+- pointer/touch event sequence;
+- relative coordinates;
+- relative timestamps;
+- event type;
+- focus/blur/visibility changes during the challenge;
+- challenge start and release timestamps;
+- coarse device/browser hints.
+
+Example telemetry:
 
 ```json
 {
-  "success": true,
-  "validation_token": "SECURE_FINAL_TOKEN_12345",
-  "message": "Humanity confirmed"
+  "modality": "mouse",
+  "points": [
+    { "x": 0, "y": 2, "t": 0 },
+    { "x": 19, "y": 3, "t": 53 },
+    { "x": 61, "y": 1, "t": 118 },
+    { "x": 180, "y": 4, "t": 920 }
+  ],
+  "events": {
+    "focus_lost": false,
+    "visibility_changed": false,
+    "pointer_cancelled": false
+  }
 }
+```
 
+Telemetry is not trusted. It is evaluated for consistency and risk only.
+
+---
+
+### Stage 5: Challenge Verification
+
+Frontend calls:
+
+```text
+POST /api/v1/challenge/verify
+```
+
+Payload:
+
+```json
+{
+  "challenge_id": "ch_123",
+  "solution": {
+    "x": 184,
+    "time_spent_ms": 1240
+  },
+  "telemetry": {
+    "modality": "mouse",
+    "points": []
+  }
+}
+```
+
+Server behavior:
+
+1. Load challenge state.
+2. Reject if missing, expired, already consumed, or not bound to the current verification session.
+3. Consume the challenge session immediately.
+4. Verify the slider solution server-side.
+5. Evaluate telemetry and behavioral signals.
+6. Update risk score and attempt counters.
+7. Decide the next action.
+
+Challenge sessions are single-use regardless of success or failure.
+
+---
+
+### Stage 6: Verification Decision
+
+Possible responses:
+
+#### Allow
+
+```json
+{
+  "decision": "allow",
+  "validation_token": "opaque_validation_token",
+  "expires_in_seconds": 120
+}
+```
+
+#### Require Fresh Challenge
+
+```json
+{
+  "decision": "retry_challenge",
+  "reason_code": "verification_uncertain",
+  "cooldown_seconds": 3
+}
+```
+
+#### Temporary Deny
+
+```json
+{
+  "decision": "temporarily_denied",
+  "reason_code": "too_many_attempts",
+  "cooldown_seconds": 600
+}
+```
+
+Do not expose detailed bot-detection reasons to the client.
+
+---
+
+### Stage 7: Slot Selection and Booking Finalization
+
+Slot selection is available only after `CHALLENGE_PASSED`.
+
+The frontend calls:
+
+```text
+POST /api/v1/bookings/finalize
+```
+
+Payload:
+
+```json
+{
+  "validation_token": "opaque_validation_token",
+  "slot_id": "slot_456",
+  "booking_data": {
+    "name": "...",
+    "email": "..."
+  }
+}
+```
+
+Server behavior:
+
+1. Validate the token.
+2. Ensure token is short-lived and unused.
+3. Ensure token is bound to the current booking intent and email hash.
+4. Apply slot-level rate limits.
+5. Atomically consume the validation token.
+6. Atomically finalize the booking if the slot is still available.
+7. Mark booking intent as `BOOKING_FINALIZED`.
+
+The validation token must not allow multiple bookings or unrelated actions.
+
+---
+
+## 9. Token Semantics
+
+### 9.1 Email Ticket
+
+Purpose:
+
+- confirm access to the submitted email address.
+
+Properties:
+
+- opaque random token;
+- stored server-side;
+- TTL: 10–15 minutes;
+- not a booking authorization token;
+- can start only a limited number of challenge sessions;
+- invalidated after successful booking;
+- may be invalidated after suspicious activity.
+
+Recommended limits:
+
+```text
+max_email_sends_per_email = 1 per 10 minutes
+max_email_sends_per_ip = configurable
+max_challenge_inits_per_ticket = 3–5
+max_failed_challenges_per_ticket = 3
+```
+
+### 9.2 Challenge Session
+
+Purpose:
+
+- represent one CAPTCHA attempt.
+
+Properties:
+
+- one-time use;
+- bound to booking intent;
+- bound to verification browser session;
+- TTL: 1–2 minutes;
+- consumed on every verify attempt;
+- stores expected solution server-side.
+
+### 9.3 Validation Token
+
+Purpose:
+
+- authorize short-lived access to slot selection/finalization.
+
+Properties:
+
+- opaque random token;
+- one-time use;
+- TTL: 1–3 minutes;
+- scoped to booking intent;
+- scoped to email hash;
+- scoped to allowed action: `booking_finalize`;
+- consumed atomically during finalization;
+- invalidated after booking success or expiration.
+
+---
+
+## 10. Risk Engine
+
+### 10.1 Inputs
+
+The risk engine evaluates multiple signal categories.
+
+#### Browser and Automation Signals
+
+Examples:
+
+- WebDriver indicators;
+- suspicious global variables;
+- inconsistent browser APIs;
+- abnormal permissions or plugin behavior;
+- inconsistent user-agent/client hints;
+- suspicious focus and visibility lifecycle.
+
+These signals are never individually decisive.
+
+#### Interaction Lifecycle Signals
+
+Examples:
+
+- time from page load to first interaction;
+- form-fill duration;
+- key event sequence quality;
+- pointer movement before click;
+- focus order;
+- copy/paste behavior;
+- challenge start timing;
+- time between email send and magic-link open.
+
+#### Challenge Telemetry Signals
+
+Examples:
+
+- solution accuracy;
+- total solve time;
+- movement curve;
+- acceleration/deceleration profile;
+- number of correction movements;
+- event interval distribution;
+- pointer/touch consistency;
+- impossible or contradictory telemetry.
+
+#### Velocity and Abuse Signals
+
+Examples:
+
+- attempts per email hash;
+- attempts per IP;
+- attempts per subnet/ASN;
+- attempts per device fingerprint;
+- attempts per booking slot group;
+- ratio of challenge failures to successes;
+- repeated behavior across many emails.
+
+#### Slot Pressure Signals
+
+Examples:
+
+- scarce/high-demand slot group;
+- sudden spike in verified sessions;
+- many validation tokens but few finalized bookings;
+- many users selecting the same slot immediately after release.
+
+---
+
+### 10.2 Example Scoring Model
+
+```text
+risk = 0
+
+risk += browser_automation_score
+risk += lifecycle_anomaly_score
+risk += challenge_solution_score
+risk += telemetry_anomaly_score
+risk += velocity_score
+risk += slot_pressure_score
+risk += fingerprint_instability_score
+risk += previous_failure_score
+```
+
+Example decision thresholds:
+
+```text
+risk < 30       -> allow
+30 <= risk < 60 -> retry challenge or small cooldown
+60 <= risk < 85 -> temporary deny
+risk >= 85      -> hard deny current ticket/session
+```
+
+Thresholds must be calibrated in shadow mode using production traffic.
+
+---
+
+## 11. Desktop vs Mobile Handling
+
+### Desktop Mouse / Trackpad
+
+Useful signals:
+
+- movement smoothness;
+- micro-corrections;
+- acceleration profile;
+- overshoot and correction;
+- event interval distribution;
+- pointer movement before drag.
+
+Avoid hard-blocking on a single movement feature.
+
+### Mobile Touch
+
+Mobile must be handled separately.
+
+Do not hard-block because of:
+
+- low Y-axis variance;
+- missing `force`;
+- static or missing `radiusX` / `radiusY`;
+- short flick-like movements;
+- sparse event points;
+- OS-level gesture smoothing.
+
+Useful mobile signals:
+
+- touch lifecycle consistency;
+- impossible coordinate jumps;
+- repeated identical traces;
+- suspiciously perfect timing across attempts;
+- mismatch between declared modality and actual events;
+- high-velocity repeated attempts from the same device/network.
+
+---
+
+## 12. Rate Limits and Abuse Controls
+
+Rate limiting must be applied across several dimensions.
+
+### Email Dispatch
+
+```text
+per_email_hash: 1 email per 10 minutes
+per_ip: configurable
+per_subnet: configurable
+per_domain: configurable
+per_booking_campaign: configurable
+```
+
+### Challenge Init
+
+```text
+per_ticket: 3–5 active attempts total
+per_session: low single-digit attempts
+per_ip/subnet: configurable
+per_device: configurable
+```
+
+### Challenge Verify
+
+```text
+challenge_id: exactly 1 attempt
+ticket: limited failed attempts
+session: limited failed attempts
+ip/subnet: velocity-based limits
+```
+
+### Validation Token
+
+```text
+token: one-time use
+booking_intent: limited successful challenges
+email_hash: limited successful challenges per window
+ip/device: limited successful challenges per window
+slot_group: pressure-based throttling
 ```
 
 ---
 
-## 5. Implementation Plan (Roadmap)
+## 13. API Specification
 
-1. Deploy the `Identity Service` to generate Magic Links. Configure Rate Limiting for email dispatch (maximum of 1 email per address per 10 minutes).
-2. Integrate the Slider widget onto the `confirm-booking` page. Configure server-side puzzle generation (using Canvas API on Node.js or ImageMagick).
-3. Implement the trajectory analyzer module. Train a baseline model on "good" data from test users to accurately calibrate the jitter and speed filters.
-4. Enable "Shadow Mode" — silently collect data and run heuristics without actively blocking, purely to analyze and mitigate false-positive rates.
-5. Full Enforcement.
+### 13.1 Create Booking Intent
+
+```text
+POST /api/v1/booking-intents
+```
+
+Request:
+
+```json
+{
+  "name": "Jane Doe",
+  "email": "jane@example.com"
+}
+```
+
+Response:
+
+```json
+{
+  "status": "email_sent"
+}
+```
+
+The response must not reveal whether the email was previously used.
 
 ---
 
-## 6. Infrastructure Security
+### 13.2 Confirm Email Ticket
 
-* **Anti-Replay & Retry Logic:**
-*Captcha Session Isolation:* A X-Captcha-Session-ID is strictly single-use. It is purged from Redis immediately after any verification attempt, regardless of whether the result was a "success" or a "failure."
+```text
+POST /api/v1/verification/email/confirm
+```
 
-*Failure Handling:* If a user fails to solve the captcha, the frontend must request a fresh session via the /init endpoint. This prevents attackers from brute-forcing a single puzzle or replaying captured telemetry.
+Request:
 
-*Email Ticket Persistence:* The Email Ticket (JWT) remains valid for multiple captcha attempts until its TTL expires or a successful booking is completed. This ensures that legitimate users can retry the puzzle if they make a mistake without needing a new email.
-* **HMAC-Telemetry:** The telemetry payload generated on the frontend must be signed with a temporary session key. This prevents bot developers from maliciously replacing the `points` array via the browser console without holding the valid session key. The client-side Telemetry Collector JS must be heavily obfuscated and mutated periodically to prevent attackers from easily reverse-engineering the HMAC signing logic or hooking into the JS context.
-* **API Origin/Referer Lockdown:** While the confirmation HTML page (`/confirm-booking`) must allow direct navigation from external sources (e.g., email clients where the `Referer` is typically null), the captcha API endpoints (`/api/v1/captcha/init` and `/api/v1/captcha/verify`) must exclusively process `Fetch/XHR` requests. The backend server must reject any API request if the HTTP `Origin` or `Referer` headers are missing, or if they do not strictly match `https://sample-booking-system.com`.
+```json
+{
+  "ticket": "opaque_email_ticket"
+}
+```
+
+Response:
+
+```json
+{
+  "status": "email_confirmed",
+  "verification_session_id": "public_session_descriptor"
+}
+```
+
+The actual verification session should also be bound to secure server-side state and/or an HTTP-only cookie.
+
+---
+
+### 13.3 Initialize Challenge
+
+```text
+POST /api/v1/challenge/init
+```
+
+Request:
+
+```json
+{
+  "verification_session_id": "public_session_descriptor"
+}
+```
+
+Response:
+
+```json
+{
+  "challenge_id": "ch_123",
+  "type": "slider",
+  "expires_in_seconds": 120,
+  "render_payload": {
+    "background_image_url": "/api/v1/challenge/assets/bg/ch_123",
+    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123",
+    "ui_config": {
+      "width": 320,
+      "height": 160
+    }
+  }
+}
+```
+
+---
+
+### 13.4 Verify Challenge
+
+```text
+POST /api/v1/challenge/verify
+```
+
+Request:
+
+```json
+{
+  "challenge_id": "ch_123",
+  "solution": {
+    "x": 184,
+    "time_spent_ms": 1240
+  },
+  "telemetry": {
+    "modality": "mouse",
+    "points": [
+      { "x": 0, "y": 2, "t": 0 },
+      { "x": 40, "y": 3, "t": 90 },
+      { "x": 120, "y": 4, "t": 470 },
+      { "x": 184, "y": 3, "t": 1240 }
+    ],
+    "events": {
+      "focus_lost": false,
+      "visibility_changed": false
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "decision": "allow",
+  "validation_token": "opaque_validation_token",
+  "expires_in_seconds": 120
+}
+```
+
+Alternative response:
+
+```json
+{
+  "decision": "retry_challenge",
+  "cooldown_seconds": 3
+}
+```
+
+---
+
+### 13.5 Finalize Booking
+
+```text
+POST /api/v1/bookings/finalize
+```
+
+Request:
+
+```json
+{
+  "validation_token": "opaque_validation_token",
+  "slot_id": "slot_456",
+  "booking_data": {
+    "name": "Jane Doe",
+    "email": "jane@example.com"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "status": "booked",
+  "booking_id": "bk_789"
+}
+```
+
+---
+
+## 14. Security Controls
+
+### 14.1 Origin and CSRF Protection
+
+For API endpoints:
+
+- validate `Origin` where available;
+- use SameSite cookies;
+- use CSRF/session nonces where appropriate;
+- reject invalid state transitions;
+- do not rely on `Referer` as a primary security boundary.
+
+Origin checks help against simple cross-site requests but do not stop real-browser automation.
+
+### 14.2 Idempotency and Atomicity
+
+Booking finalization must be atomic:
+
+1. validate token;
+2. acquire slot lock or use database transaction;
+3. consume token;
+4. create booking;
+5. mark intent finalized;
+6. release lock / commit transaction.
+
+The same validation token cannot finalize two bookings.
+
+### 14.3 Logging and Audit
+
+Log security-relevant events:
+
+- booking intent created;
+- email sent;
+- email confirmed;
+- challenge initialized;
+- challenge verified;
+- challenge failed;
+- validation token issued;
+- booking finalized;
+- rate limit triggered;
+- risk decision made.
+
+Logs should include:
+
+- event type;
+- timestamp;
+- booking intent id;
+- email hash;
+- challenge id;
+- risk score bucket;
+- decision;
+- IP/subnet/ASN where legally acceptable;
+- coarse browser/device information.
+
+Avoid storing raw high-resolution behavioral traces longer than necessary.
+
+---
+
+## 15. Privacy and Data Retention
+
+Telemetry and fingerprint-like data should be minimized.
+
+Recommended retention:
+
+```text
+raw telemetry: 7–14 days
+aggregated risk features: 30–90 days
+security audit logs: according to internal policy
+email hash / booking intent: according to booking policy
+```
+
+Store hashed or coarse identifiers where possible.
+
+---
+
+## 16. Shadow Mode Rollout
+
+Before enforcement, run the system in shadow mode.
+
+Shadow mode behavior:
+
+- collect risk signals;
+- calculate risk score;
+- record would-have-blocked decisions;
+- allow the user through unless the existing production system would block them.
+
+Metrics to collect:
+
+- challenge pass rate;
+- challenge fail rate;
+- retry rate;
+- mobile vs desktop pass rate;
+- browser-specific false positives;
+- time to complete verification;
+- email confirmation rate;
+- booking finalization rate after successful challenge;
+- high-risk traffic volume;
+- suspected automation success rate.
+
+Enforcement should start gradually:
+
+```text
+Phase 1: shadow only
+Phase 2: cooldown for high-risk sessions
+Phase 3: retry challenge for medium-risk sessions
+Phase 4: temporary deny for very high-risk sessions
+Phase 5: tune thresholds continuously
+```
+
+---
+
+## 17. Operational Playbooks
+
+### 17.1 High Failure Spike
+
+Possible causes:
+
+- broken CAPTCHA asset generation;
+- frontend regression;
+- mobile browser incompatibility;
+- overly strict threshold;
+- CDN/cache issue.
+
+Immediate actions:
+
+- disable hard deny;
+- fall back to allow-with-logging;
+- inspect recent challenge failures;
+- compare mobile and desktop metrics;
+- roll back challenge library update if needed.
+
+### 17.2 Slot Attack Spike
+
+Signals:
+
+- many email confirmations;
+- many challenge starts;
+- many validation tokens;
+- low booking-finalization ratio;
+- concentration on one slot group;
+- repeated IP/subnet/ASN/device patterns.
+
+Actions:
+
+- tighten per-slot-group throttling;
+- shorten validation-token TTL;
+- add cooldown for high-risk sessions;
+- reduce max challenge attempts per ticket;
+- temporarily raise risk score for affected slot group.
+
+### 17.3 Selenium Pattern Detected
+
+Actions:
+
+- add or adjust browser automation signal weights;
+- add decoy/honeypot signal if safe;
+- increase cooldown for matching sessions;
+- avoid revealing the exact detection reason.
+
+---
+
+## 18. Implementation Plan
+
+### Phase 1: State Machine and Token Hardening
+
+- Replace self-contained magic-link JWT with opaque server-side email ticket.
+- Add booking intent state machine.
+- Add challenge session state.
+- Add one-time validation token.
+- Add atomic booking finalization.
+
+### Phase 2: Open-Source Slider Integration
+
+- Select an open-source slider CAPTCHA library.
+- Integrate frontend widget.
+- Keep answer generation and verification server-side.
+- Add mobile support testing.
+- Add basic telemetry collection.
+
+### Phase 3: Rate Limits and Counters
+
+- Add email dispatch limits.
+- Add challenge init limits.
+- Add challenge verify limits.
+- Add validation-token limits.
+- Add slot-group pressure limits.
+
+### Phase 4: Risk Engine v1
+
+- Implement simple weighted scoring.
+- Add browser automation signals.
+- Add lifecycle timing signals.
+- Add telemetry anomaly signals.
+- Add velocity signals.
+- Return allow/retry/cooldown/deny decisions.
+
+### Phase 5: Shadow Mode
+
+- Run risk scoring without enforcement.
+- Collect metrics.
+- Tune desktop/mobile thresholds separately.
+- Identify browser-specific false positives.
+
+### Phase 6: Gradual Enforcement
+
+- Enable cooldown for high-risk traffic.
+- Enable retry challenge for medium-risk traffic.
+- Enable temporary deny only after confidence is high.
+- Keep kill switch for all enforcement decisions.
+
+---
+
+## 19. Key Design Decisions
+
+### Use Opaque Tokens Instead of JWT for Email Links
+
+Opaque tokens are easier to revoke, count, expire, and bind to server-side state. They also avoid exposing email or booking data in URLs and logs.
+
+### Treat Slider CAPTCHA as Friction, Not Proof
+
+Slider challenges are solvable by sufficiently advanced automation. The system uses them to increase attack cost and collect interaction signals.
+
+### Separate Mobile and Desktop Scoring
+
+Mobile touch behavior differs significantly from desktop mouse behavior. Strict desktop heuristics should not be applied to mobile.
+
+### Consume Challenge Sessions on Every Attempt
+
+This prevents repeated brute force or telemetry replay against the same challenge.
+
+### Keep Validation Tokens Short-Lived
+
+A successful challenge should grant only a short window to select and finalize a slot.
+
+---
+
+## 20. Open Questions
+
+1. Which frontend framework must the slider component support?
+2. What is the acceptable false-positive rate?
+3. How many retries should a legitimate user get before cooldown?
+4. What are the expected peak booking volumes?
+5. Are IP/ASN-based controls legally and operationally acceptable?
+6. Should high-demand slot groups use stricter thresholds?
+7. What is the maximum acceptable verification completion time on mobile?
+
+---
+
+## 21. Summary
+
+The proposed system protects booking slots through a layered verification flow:
+
+- email confirms basic intent;
+- open-source slider CAPTCHA adds friction;
+- telemetry contributes risk signals;
+- server-side state prevents replay and invalid transitions;
+- short-lived validation tokens limit abuse after verification;
+- rate limits and slot-pressure controls reduce high-volume attacks;
+- risk scoring allows adaptive decisions instead of fragile hard rules.
+
+This design is expected to be effective against basic Selenium scripts and to materially increase the cost of AI agents using real Chrome. It is not expected to fully stop human solver farms or highly resourced attackers, but it should make automated slot booking less reliable and less scalable.

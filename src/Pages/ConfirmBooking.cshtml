@@ -1,0 +1,77 @@
+﻿@page "/confirm-booking"
+@model HumanLoopBooking.Pages.ConfirmBookingModel
+@{
+    ViewData["Title"] = "Validate booking";
+    var ticket = Request.Query["t"].ToString();
+}
+
+<section class="verification-shell" data-page="verification" data-ticket="@ticket">
+    <div id="stepper" class="stepper validate-phase" aria-label="Booking progress">
+        <div class="step complete">
+            <span>1</span>
+            <strong>Booking data</strong>
+        </div>
+        <div class="step select-step">
+            <span>2</span>
+            <strong>Select a date</strong>
+        </div>
+        <div class="step validate-step active">
+            <span>3</span>
+            <strong>Validate</strong>
+        </div>
+        <div class="step confirm-step">
+            <span>4</span>
+            <strong>Confirmation</strong>
+        </div>
+    </div>
+
+    <section id="loadingView" class="verification-panel">
+        <p id="loadingStatus" class="status-line strong">Opening verification session...</p>
+    </section>
+
+    <section id="challengeView" class="verification-panel challenge-panel" hidden>
+        <div class="challenge-header">
+            <h1>Validate</h1>
+            <p id="challengeStatus" class="status-line" role="status"></p>
+        </div>
+
+        <div class="captcha-widget">
+            <div id="puzzleFrame" class="puzzle-frame">
+                <img id="challengeBackground" alt="" />
+                <img id="challengePiece" alt="" />
+            </div>
+            <div id="sliderTrack" class="slider-track">
+                <div id="sliderProgress" class="slider-progress"></div>
+                <button id="sliderHandle" class="slider-handle" type="button" title="Verify alignment">
+                    <span></span>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <section id="slotsView" class="slots-view" hidden>
+        <div class="time-filter">
+            <label for="timePeriod">Time period:</label>
+            <div class="control-with-addon date-control compact">
+                <input id="timePeriod" type="text" value="01/06/2026" readonly />
+                <span class="addon calendar-addon" aria-hidden="true"></span>
+            </div>
+            <strong>from</strong>
+        </div>
+
+        <div id="slotGrid" class="slot-grid" aria-live="polite"></div>
+
+        <div class="pager" aria-label="Slot pages">
+            <button type="button" title="Previous page">&laquo;</button>
+            <button type="button">1</button>
+            <button type="button" class="active">2</button>
+            <button type="button" title="Next page">&raquo;</button>
+        </div>
+
+        <p id="bookingStatus" class="status-line centered" role="status"></p>
+    </section>
+</section>
+
+@section Scripts {
+    <script src="~/js/challenge.js" asp-append-version="true"></script>
+}
