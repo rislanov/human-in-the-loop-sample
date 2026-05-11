@@ -1,9 +1,23 @@
 namespace HumanLoopBooking.Services;
 
-public sealed class RiskEngine
+// Combines independent weak signals into a single operational decision.
+// This class intentionally avoids "one signal equals block" rules: browser
+// markers, timing, protocol quality, and pointer telemetry can all be spoofed or
+// noisy, but the combination is useful for making automation less reliable.
+public sealed class RiskEngine : IRiskEngine
 {
+    private readonly ITrajectoryAnalyzer _trajectoryAnalyzer;
+
+    public RiskEngine(ITrajectoryAnalyzer trajectoryAnalyzer)
+    {
+        _trajectoryAnalyzer = trajectoryAnalyzer;
+    }
+
     public int ScoreForm(FormTelemetry? telemetry)
     {
+        // Missing pre-submit telemetry is not a fatal error. Real browsers can lose
+        // events because of extensions, privacy settings, or script loading races.
+        // We start with a small risk bump instead of blocking early in the flow.
         if (telemetry is null)
         {
             return 10;
@@ -44,20 +58,31 @@ public sealed class RiskEngine
         BookingIntent intent,
         ChallengeSession challenge,
         VerifyChallengeRequest request,
-        bool accurate)
+        bool acceptedSolution,
+        ChallengeProtocolAssessment protocol)
     {
         var telemetry = request.Telemetry;
         var solution = request.Solution;
+        var riskSignals = new List<string>();
         var risk = Math.Min(intent.RiskScore, 50);
 
+        // Carry previous context into the challenge decision, but cap it. A user
+        // should be able to recover from one awkward drag; repeated failures and
+        // repeated challenge inits are what raise confidence.
         risk += intent.ChallengeFailCount * 10;
         risk += Math.Max(0, intent.ChallengeInitCount - 1) * 4;
         risk += ScoreBrowserSignals(request.Browser);
 
-        if (!accurate)
+        // A failed visual/protocol solution is strong evidence, but still one
+        // signal in a larger decision. This keeps the policy risk-based rather
+        // than making the slider a single binary truth source.
+        if (!acceptedSolution)
         {
             risk += 40;
         }
+
+        risk += protocol.RiskScore;
+        riskSignals.AddRange(protocol.Signals);
 
         if (solution is null)
         {
@@ -65,6 +90,9 @@ public sealed class RiskEngine
         }
         else
         {
+            // Extremely fast solves are suspicious because the active phase has a
+            // randomized delay and the user must visually align the piece. The values
+            // are still heuristic and should be calibrated from production telemetry.
             if (solution.TimeSpentMs is > 0 and < 450)
             {
                 risk += 35;
@@ -81,26 +109,16 @@ public sealed class RiskEngine
             }
         }
 
-        if (telemetry is null)
+        if (telemetry is not null)
         {
-            risk += 20;
-        }
-        else
-        {
-            var pointCount = telemetry.Points.Count;
             var modality = telemetry.Modality?.Trim().ToLowerInvariant();
 
-            if (modality == "mouse" && pointCount < 8)
-            {
-                risk += 14;
-            }
-            else if (modality == "touch" && pointCount < 3)
+            // Modality inconsistencies are weak signals. They catch simple scripts
+            // without requiring fragile properties such as touch force/radius.
+            if (modality == "touch" && request.Browser is { TouchCapable: false })
             {
                 risk += 8;
-            }
-            else if (pointCount == 0)
-            {
-                risk += 18;
+                riskSignals.Add("touch_modality_on_non_touch_browser");
             }
 
             if (telemetry.Events.FocusLost)
@@ -117,20 +135,37 @@ public sealed class RiskEngine
             {
                 risk += 6;
             }
+        }
 
-            if (LooksSynthetic(telemetry.Points))
-            {
-                risk += 14;
-            }
+        var trajectory = _trajectoryAnalyzer.Analyze(telemetry, solution, challenge);
+        risk += trajectory.RiskScore;
+        riskSignals.AddRange(trajectory.Signals);
+
+        // Replayed movement traces are a strong automation hint. This comparison is
+        // intentionally coarse and ticket-local, so it does not store raw telemetry.
+        if (!string.IsNullOrWhiteSpace(trajectory.Fingerprint) &&
+            string.Equals(intent.LastTrajectoryFingerprint, trajectory.Fingerprint, StringComparison.Ordinal))
+        {
+            risk += Math.Min(20, 12 + (intent.RepeatedTrajectoryCount * 4));
+            riskSignals.Add("repeated_trajectory_fingerprint");
         }
 
         risk = Math.Clamp(risk, 0, 100);
-        var decision = Decide(risk, accurate, intent.ChallengeFailCount);
-        return new RiskAssessment(risk, Bucket(risk), decision.Decision, decision.ReasonCode);
+        var decision = Decide(risk, acceptedSolution, intent.ChallengeFailCount);
+        return new RiskAssessment(
+            risk,
+            Bucket(risk),
+            decision.Decision,
+            decision.ReasonCode,
+            trajectory.Fingerprint,
+            riskSignals);
     }
 
     private static int ScoreBrowserSignals(BrowserSignals? browser)
     {
+        // Browser signals are deliberately low-weight. navigator.webdriver and
+        // Headless user agents catch commodity automation, but targeted attackers
+        // can patch them; they should never be treated as a security boundary.
         if (browser is null)
         {
             return 0;
@@ -163,32 +198,16 @@ public sealed class RiskEngine
         return risk;
     }
 
-    private static bool LooksSynthetic(IReadOnlyList<TelemetryPoint> points)
+    private static (string Decision, string ReasonCode) Decide(int risk, bool acceptedSolution, int previousFailures)
     {
-        if (points.Count < 6)
-        {
-            return false;
-        }
-
-        var identicalY = points.Select(point => point.Y).Distinct().Count() == 1;
-        var intervals = points.Zip(points.Skip(1), (left, right) => Math.Max(0, right.T - left.T)).ToArray();
-        var repeatedIntervals = intervals.Length > 4 && intervals.Distinct().Count() <= 2;
-        var repeatedStep = points.Zip(points.Skip(1), (left, right) => right.X - left.X)
-            .Where(delta => delta > 0)
-            .Distinct()
-            .Count() <= 2;
-
-        return identicalY && repeatedIntervals && repeatedStep;
-    }
-
-    private static (string Decision, string ReasonCode) Decide(int risk, bool accurate, int previousFailures)
-    {
+        // These thresholds are sample defaults. The design document recommends
+        // shadow-mode calibration before production enforcement.
         if (risk >= 90)
         {
             return ("hard_denied", "critical_risk");
         }
 
-        if (!accurate)
+        if (!acceptedSolution)
         {
             return previousFailures >= 2
                 ? ("temporarily_denied", "too_many_attempts")

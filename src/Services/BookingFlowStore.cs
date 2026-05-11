@@ -1,7 +1,11 @@
-using System.Security.Cryptography;
-
 namespace HumanLoopBooking.Services;
 
+// BookingFlowStore is the demo application's state-machine coordinator.
+// It owns booking-specific concerns (email tickets, browser sessions, validation
+// grants, slot finalization, rate limits, and audit events) and delegates the
+// reusable security work to IChallengeSessionFactory, IChallengeProtocolValidator,
+// and IRiskEngine. In production this class would usually be split between a
+// database-backed booking service and a Redis-backed temporary-state service.
 public sealed class BookingFlowStore
 {
     public const string VerificationCookieName = "__booking_verification";
@@ -33,18 +37,24 @@ public sealed class BookingFlowStore
     private const string AuditKey = "booking:audit";
 
     private readonly IDistributedCacheService _cache;
-    private readonly RiskEngine _riskEngine;
+    private readonly IRiskEngine _riskEngine;
+    private readonly IChallengeSessionFactory _challengeFactory;
+    private readonly IChallengeProtocolValidator _challengeProtocolValidator;
     private readonly TimeProvider _clock;
     private readonly ILogger<BookingFlowStore> _logger;
 
     public BookingFlowStore(
         IDistributedCacheService cache,
-        RiskEngine riskEngine,
+        IRiskEngine riskEngine,
+        IChallengeSessionFactory challengeFactory,
+        IChallengeProtocolValidator challengeProtocolValidator,
         TimeProvider clock,
         ILogger<BookingFlowStore> logger)
     {
         _cache = cache;
         _riskEngine = riskEngine;
+        _challengeFactory = challengeFactory;
+        _challengeProtocolValidator = challengeProtocolValidator;
         _clock = clock;
         _logger = logger;
 
@@ -217,16 +227,9 @@ public sealed class BookingFlowStore
 
             ApplyDeviceMismatchPenalty(intent, session, context);
 
-            var challenge = new ChallengeSession
-            {
-                Id = SecurityHelpers.NewToken("ch"),
-                IntentId = intent.Id,
-                VerificationSessionId = session.Id,
-                CreatedAt = now,
-                ExpiresAt = now.Add(ChallengeTtl),
-                TargetX = RandomNumberGenerator.GetInt32(126, 288),
-                PieceY = RandomNumberGenerator.GetInt32(48, 102)
-            };
+            // The challenge subsystem generates all visual/protocol parameters.
+            // The booking flow only persists the resulting server-owned session.
+            var challenge = _challengeFactory.Create(intent.Id, session.Id, now, ChallengeTtl, intent.RiskScore);
 
             intent.ChallengeInitCount++;
             intent.Status = BookingIntentStatus.ChallengeStarted;
@@ -234,6 +237,59 @@ public sealed class BookingFlowStore
             _cache.Set(ChallengeKey(challenge.Id), challenge, ChallengeTtl);
 
             Audit("challenge_initialized", intent, challenge.Id, Bucket(intent.RiskScore), intent.RiskScore, "challenge_started", "One-time slider challenge created.", context);
+            return StoreResult<ChallengeSession>.Ok(challenge);
+        }
+    }
+
+    public StoreResult<ChallengeSession> StartChallenge(
+        StartChallengeRequest request,
+        string? cookieSessionId,
+        RequestSecurityContext context)
+    {
+        if (string.IsNullOrWhiteSpace(request.ChallengeId))
+        {
+            return StoreResult<ChallengeSession>.Fail("missing_challenge");
+        }
+
+        var now = _clock.GetUtcNow();
+        lock (_cache.SyncRoot)
+        {
+            if (!_cache.TryGet<ChallengeSession>(ChallengeKey(request.ChallengeId), out var challenge) ||
+                challenge is null ||
+                !TryGetIntent(challenge.IntentId, out var intent))
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            }
+
+            var sessionResult = ResolveSessionLocked(challenge.VerificationSessionId, cookieSessionId, context);
+            if (!sessionResult.Success)
+            {
+                return StoreResult<ChallengeSession>.Fail(sessionResult.ErrorCode);
+            }
+
+            if (intent.Status != BookingIntentStatus.ChallengeStarted)
+            {
+                return StoreResult<ChallengeSession>.Fail("invalid_state");
+            }
+
+            if (challenge.Consumed || now > challenge.ExpiresAt)
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_expired_or_consumed");
+            }
+
+            if (string.IsNullOrWhiteSpace(challenge.PhaseNonce))
+            {
+                challenge.PhaseNonce = SecurityHelpers.NewToken("cp");
+                challenge.StartedAt = now;
+                challenge.ActivatedAt = now.AddMilliseconds(challenge.ActivationDelayMs);
+
+                // The start mark is deliberately server-side. A Redis implementation
+                // should write it with compare-and-set semantics so a challenge cannot
+                // be forked into multiple parallel interaction lifecycles.
+                _cache.Set(ChallengeKey(challenge.Id), challenge, RemainingTtl(challenge.ExpiresAt, now));
+                Audit("challenge_interaction_started", intent, challenge.Id, Bucket(intent.RiskScore), intent.RiskScore, "interaction_started", "Slider interaction lifecycle started.", context);
+            }
+
             return StoreResult<ChallengeSession>.Ok(challenge);
         }
     }
@@ -292,8 +348,14 @@ public sealed class BookingFlowStore
 
             ApplyDeviceMismatchPenalty(intent, session, context);
 
-            var accurate = Math.Abs(request.Solution.X - challenge.TargetX) <= challenge.Tolerance;
-            var risk = _riskEngine.ScoreChallenge(intent, challenge, request, accurate);
+            // Verification has two layers: the visual answer must be close enough,
+            // and the interactive protocol must have been completed. The risk engine
+            // then decides whether that accepted solution is enough for this session.
+            var xAccurate = Math.Abs(request.Solution.X - challenge.TargetX) <= challenge.Tolerance;
+            var protocol = _challengeProtocolValidator.Assess(challenge, request.Solution, request.Telemetry);
+            var acceptedSolution = xAccurate && protocol.IsSatisfied;
+            var risk = _riskEngine.ScoreChallenge(intent, challenge, request, acceptedSolution, protocol);
+            TrackTrajectoryFingerprint(intent, risk.TrajectoryFingerprint);
 
             if (risk.Decision == "allow")
             {
@@ -303,7 +365,7 @@ public sealed class BookingFlowStore
                 {
                     intent.Status = BookingIntentStatus.TemporarilyDenied;
                     SaveIntent(intent);
-                    Audit("rate_limit_triggered", intent, challenge.Id, Bucket(risk.Score), risk.Score, "temporarily_denied", "Validation token velocity limit reached.", context);
+                    Audit("rate_limit_triggered", intent, challenge.Id, Bucket(risk.Score), risk.Score, "temporarily_denied", "Validation token velocity limit reached.", context, risk.Signals);
                     return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                         "temporarily_denied",
                         null,
@@ -331,8 +393,8 @@ public sealed class BookingFlowStore
                 intent.ChallengePassedAt = now;
                 SaveIntent(intent);
 
-                Audit("challenge_verified", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Validation token issued.", context);
-                Audit("validation_token_issued", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Short-lived booking validation token issued.", context);
+                Audit("challenge_verified", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Validation token issued.", context, risk.Signals);
+                Audit("validation_token_issued", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Short-lived booking validation token issued.", context, risk.Signals);
                 return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                     "allow",
                     token,
@@ -348,7 +410,7 @@ public sealed class BookingFlowStore
                 intent.ChallengeFailCount++;
                 intent.Status = BookingIntentStatus.EmailConfirmed;
                 SaveIntent(intent);
-                Audit("challenge_failed", intent, challenge.Id, risk.Bucket, risk.Score, "retry_challenge", "Challenge failed or risk was uncertain.", context);
+                Audit("challenge_failed", intent, challenge.Id, risk.Bucket, risk.Score, "retry_challenge", "Challenge failed or risk was uncertain.", context, risk.Signals);
                 return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                     "retry_challenge",
                     null,
@@ -362,7 +424,7 @@ public sealed class BookingFlowStore
                 ? BookingIntentStatus.HardDenied
                 : BookingIntentStatus.TemporarilyDenied;
             SaveIntent(intent);
-            Audit("risk_decision_made", intent, challenge.Id, risk.Bucket, risk.Score, risk.Decision, "Risk threshold exceeded.", context);
+            Audit("risk_decision_made", intent, challenge.Id, risk.Bucket, risk.Score, risk.Decision, "Risk threshold exceeded.", context, risk.Signals);
             return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                 risk.Decision,
                 null,
@@ -592,6 +654,25 @@ public sealed class BookingFlowStore
         Audit("risk_signal_observed", intent, null, Bucket(intent.RiskScore), intent.RiskScore, "device_mismatch", "Coarse browser/device hash changed during verification.", context);
     }
 
+    private static void TrackTrajectoryFingerprint(BookingIntent intent, string? fingerprint)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint))
+        {
+            return;
+        }
+
+        // Keep only a coarse, ticket-local trace fingerprint. A Redis-backed store
+        // should preserve the same semantics with an atomic compare-and-set update.
+        if (string.Equals(intent.LastTrajectoryFingerprint, fingerprint, StringComparison.Ordinal))
+        {
+            intent.RepeatedTrajectoryCount++;
+            return;
+        }
+
+        intent.LastTrajectoryFingerprint = fingerprint;
+        intent.RepeatedTrajectoryCount = 0;
+    }
+
     private static string? ValidateBookingRequest(CreateBookingIntentRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name) ||
@@ -664,7 +745,8 @@ public sealed class BookingFlowStore
         int? riskScore,
         string? decision,
         string? message,
-        RequestSecurityContext context)
+        RequestSecurityContext context,
+        IReadOnlyList<string>? riskSignals = null)
     {
         var auditEvent = new AuditEvent
         {
@@ -679,6 +761,7 @@ public sealed class BookingFlowStore
             IpHash = context.IpHash,
             SubnetHash = context.SubnetHash,
             DeviceHash = context.DeviceHash,
+            RiskSignals = riskSignals?.ToArray() ?? [],
             Message = message
         };
 

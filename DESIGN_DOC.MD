@@ -1180,3 +1180,84 @@ The proposed system protects booking slots through a layered verification flow:
 - risk scoring allows adaptive decisions instead of fragile hard rules.
 
 This design is expected to be effective against basic Selenium scripts and to materially increase the cost of AI agents using real Chrome. It is not expected to fully stop human solver farms or highly resourced attackers, but it should make automated slot booking less reliable and less scalable.
+
+---
+
+## 22. Sample Implementation Status
+
+This section describes the current .NET 10 / Razor sample implementation in
+`src/`.
+
+### Implemented
+
+- Initial booking form, development email preview modal, and `Continue Booking`
+  flow.
+- Opaque email tickets stored server-side.
+- Email confirmation exchange for a short-lived browser verification session.
+- HTTP-only verification session cookie plus frontend session nonce header.
+- One-time challenge sessions with short TTL.
+- One-time validation tokens for slot access and booking finalization.
+- Slot selection only after successful challenge verification.
+- Atomic in-memory booking finalization for the demo slot list.
+- Multi-dimensional rate limits for email creation, challenge init, challenge
+  verify, validation-token issuance, and slot pressure.
+- In-memory state store wrapped behind `IDistributedCacheService`, with comments
+  marking where a Redis implementation must provide atomic operations.
+- Security audit events with hashed/coarse identifiers and risk signals.
+- Origin check for same-site API POST requests.
+
+### Implemented Custom Interactive Challenge
+
+The sample currently implements a custom challenge layer in `src/Security`:
+
+- `IChallengeSessionFactory` generates server-owned challenge sessions.
+- `IChallengeProtocolValidator` validates the interaction lifecycle.
+- `IChallengeAssetRenderer` renders demo challenge assets.
+- `ITrajectoryAnalyzer` evaluates pointer/touch trajectory features.
+- `IRiskEngine` combines protocol, trajectory, browser, retry, and lifecycle
+  signals into risk decisions.
+
+The challenge protocol includes:
+
+- `/api/v1/challenge/init` for render-safe challenge setup.
+- `/api/v1/challenge/start` to mark server-side pointerdown lifecycle start.
+- `/api/v1/challenge/verify` for single-use release verification.
+- Active visual phase after a randomized delay.
+- Challenge variants:
+  - `reveal_target`;
+  - `shift_after_start`;
+  - `hold_and_release`.
+- Server-owned target coordinate, tolerance, variant, phase nonce, and timing.
+- Client telemetry with drag phases and `pre_active` / `active` state markers.
+- Second-plane slider movement used as a risk signal.
+- Coarse trajectory fingerprinting to detect repeated traces without storing raw
+  high-resolution telemetry.
+
+This implementation intentionally treats the slider as a friction and signal
+source, not as proof of humanity.
+
+### Important Deviations From The Original Design
+
+- The original document recommends using an existing open-source slider CAPTCHA
+  component as the visual base. The current sample uses a custom renderer because
+  the goal of the prototype shifted toward demonstrating a dynamic custom
+  challenge protocol. Production deployment should either evaluate a vetted
+  open-source component or keep the custom protocol with a clear maintenance and
+  QA budget.
+- Risk enforcement is active in the sample. The design recommends shadow-mode
+  calibration before production enforcement.
+
+### Not Yet Implemented
+
+- Redis-backed `IDistributedCacheService`.
+- Production database persistence for booking intents, audit logs, and slots.
+- Shadow mode, enforcement kill switches, and staged rollout controls.
+- Admin authentication/authorization for audit endpoints.
+- ASN / reputation enrichment and production metrics dashboards.
+- Dedicated mobile/touch calibration across iOS, Android, and common browsers.
+- Automated unit/integration test project.
+- Progressive slot inventory release, slot holds, or delayed inventory exposure.
+- Non-enumerating production response for email rate limiting. The API still
+  returns `email_rate_limited` in this demo for development visibility.
+- Accessibility work, which remains intentionally outside the scope of this
+  sample document.

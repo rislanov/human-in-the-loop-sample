@@ -11,12 +11,19 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
 });
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<RiskEngine>();
+
+// Security subsystem registrations. These interfaces are the seams that make
+// the custom challenge, protocol validation, telemetry heuristics, and risk
+// decisions portable to a production booking application.
+builder.Services.AddSingleton<ITrajectoryAnalyzer, TrajectoryAnalyzer>();
+builder.Services.AddSingleton<IChallengeProtocolValidator, ChallengeProtocolValidator>();
+builder.Services.AddSingleton<IRiskEngine, RiskEngine>();
+builder.Services.AddSingleton<IChallengeSessionFactory, InteractiveChallengeSessionFactory>();
 // Demo-only backing store. Swap this registration for a Redis-backed
 // IDistributedCacheService before running multiple app instances.
 builder.Services.AddSingleton<IDistributedCacheService, InMemoryDistributedCacheService>();
 builder.Services.AddSingleton<BookingFlowStore>();
-builder.Services.AddSingleton<ChallengeAssetRenderer>();
+builder.Services.AddSingleton<IChallengeAssetRenderer, ChallengeAssetRenderer>();
 
 var app = builder.Build();
 
@@ -114,19 +121,53 @@ app.MapPost("/api/v1/challenge/init", (InitChallengeRequest request, HttpContext
         RenderPayload = new RenderPayload(
             $"/api/v1/challenge/assets/bg/{Uri.EscapeDataString(challenge.Id)}",
             $"/api/v1/challenge/assets/piece/{Uri.EscapeDataString(challenge.Id)}",
-            new RenderUiConfig(challenge.Width, challenge.Height, challenge.PieceSize, challenge.PieceY))
+            ToRenderUiConfig(challenge))
     });
 });
 
-app.MapGet("/api/v1/challenge/assets/bg/{challengeId}", (string challengeId, BookingFlowStore store, ChallengeAssetRenderer renderer) =>
+app.MapPost("/api/v1/challenge/start", (StartChallengeRequest request, HttpContext http, BookingFlowStore store) =>
 {
-    var result = store.GetChallengeForAsset(challengeId);
-    return result.Success && result.Value is not null
-        ? Results.Bytes(renderer.RenderBackground(result.Value), "image/png")
-        : Results.NotFound();
+    http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
+    var result = store.StartChallenge(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
+
+    if (!result.Success || result.Value is not { } challenge)
+    {
+        return Results.BadRequest(new { Error = result.ErrorCode });
+    }
+
+    return Results.Ok(new
+    {
+        Status = "challenge_started",
+        ChallengeId = challenge.Id,
+        PhaseNonce = challenge.PhaseNonce,
+        ActivationDelayMs = challenge.ActivationDelayMs,
+        ActiveBackgroundImageUrl = $"/api/v1/challenge/assets/bg/{Uri.EscapeDataString(challenge.Id)}?phase=active",
+        UiConfig = ToRenderUiConfig(challenge)
+    });
 });
 
-app.MapGet("/api/v1/challenge/assets/piece/{challengeId}", (string challengeId, BookingFlowStore store, ChallengeAssetRenderer renderer) =>
+app.MapGet("/api/v1/challenge/assets/bg/{challengeId}", (string challengeId, HttpContext http, BookingFlowStore store, IChallengeAssetRenderer renderer) =>
+{
+    var result = store.GetChallengeForAsset(challengeId);
+    if (!result.Success || result.Value is not { } challenge)
+    {
+        return Results.NotFound();
+    }
+
+    var phase = http.Request.Query.TryGetValue("phase", out var phaseValues)
+        ? phaseValues.ToString()
+        : "";
+
+    if (string.Equals(phase, "active", StringComparison.OrdinalIgnoreCase) &&
+        challenge.StartedAt is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Bytes(renderer.RenderBackground(challenge, phase), "image/png");
+});
+
+app.MapGet("/api/v1/challenge/assets/piece/{challengeId}", (string challengeId, BookingFlowStore store, IChallengeAssetRenderer renderer) =>
 {
     var result = store.GetChallengeForAsset(challengeId);
     return result.Success && result.Value is not null
@@ -180,6 +221,21 @@ app.MapPost("/api/v1/bookings/finalize", (FinalizeBookingRequest request, HttpCo
 app.MapGet("/api/v1/audit/recent", (BookingFlowStore store) => Results.Ok(new { Events = store.GetRecentAuditEvents() }));
 
 app.Run();
+
+static RenderUiConfig ToRenderUiConfig(ChallengeSession challenge)
+{
+    return new RenderUiConfig(
+        challenge.Width,
+        challenge.Height,
+        challenge.PieceSize,
+        challenge.PieceY,
+        challenge.TrackWidth,
+        challenge.HandleSize,
+        challenge.StripeOffset,
+        challenge.ActivationDelayMs,
+        challenge.Variant,
+        challenge.HoldRequirementMs);
+}
 
 static RequestSecurityContext BuildSecurityContext(HttpContext http, BrowserSignals? browser)
 {

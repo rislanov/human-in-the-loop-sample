@@ -4,12 +4,18 @@ using System.Security.Cryptography;
 
 namespace HumanLoopBooking.Services;
 
-public sealed class ChallengeAssetRenderer
+// Demo renderer for the custom interactive challenge. It deliberately avoids
+// exposing the target coordinate in JSON, but it is not meant to be a secret
+// image-processing product. A production app can replace this class through
+// IChallengeAssetRenderer while keeping the protocol/risk contracts intact.
+public sealed class ChallengeAssetRenderer : IChallengeAssetRenderer
 {
-    public byte[] RenderBackground(ChallengeSession challenge)
+    public byte[] RenderBackground(ChallengeSession challenge, string? phase)
     {
         var palette = PaletteFor(challenge.Id);
         var canvas = new PixelCanvas(challenge.Width, challenge.Height);
+        var active = string.Equals(phase, "active", StringComparison.OrdinalIgnoreCase) &&
+            challenge.StartedAt is not null;
 
         canvas.Clear(palette.Wash);
         canvas.FillVerticalGradient(palette.Light, palette.Wash);
@@ -20,10 +26,20 @@ public sealed class ChallengeAssetRenderer
         canvas.StrokeLine(18, 136, 342, 122, 12, palette.Navy.WithAlpha(58));
         canvas.StrokeLine(24, 78, 344, 69, 8, Rgba.White.WithAlpha(112));
 
-        canvas.FillPuzzleMask(challenge.TargetX + 2, challenge.PieceY + 5, palette.Navy.WithAlpha(52));
-        canvas.FillPuzzleMask(challenge.TargetX, challenge.PieceY, Rgba.White.WithAlpha(228));
-        canvas.StrokePuzzleMask(challenge.TargetX, challenge.PieceY, palette.Navy.WithAlpha(176));
-        canvas.StrokePuzzleMask(challenge.TargetX - 1, challenge.PieceY - 1, Rgba.White.WithAlpha(112));
+        if (active)
+        {
+            DrawTarget(canvas, challenge.TargetX, challenge.PieceY, palette, strong: true);
+        }
+        else if (challenge.Variant == ChallengeVariants.ShiftAfterStart)
+        {
+            // Before pointerdown the user sees only a plausible preview target. The
+            // real target appears after the server records the interaction start.
+            DrawTarget(canvas, challenge.PreviewTargetX, challenge.PieceY, palette, strong: false);
+        }
+        else
+        {
+            DrawPreviewNoise(canvas, challenge, palette);
+        }
 
         return PngEncoder.EncodeRgba(challenge.Width, challenge.Height, canvas.Pixels);
     }
@@ -56,6 +72,33 @@ public sealed class ChallengeAssetRenderer
     {
         return FormattableString.Invariant(
             $"M{x} {y} h18 c0 -8 12 -8 12 0 h18 v18 c8 0 8 12 0 12 v18 h-48 v-18 c-8 0 -8 -12 0 -12 z");
+    }
+
+    private static void DrawTarget(PixelCanvas canvas, int x, int y, Palette palette, bool strong)
+    {
+        var shadowAlpha = strong ? (byte)52 : (byte)30;
+        var fillAlpha = strong ? (byte)228 : (byte)86;
+        var strokeAlpha = strong ? (byte)176 : (byte)72;
+
+        canvas.FillPuzzleMask(x + 2, y + 5, palette.Navy.WithAlpha(shadowAlpha));
+        canvas.FillPuzzleMask(x, y, Rgba.White.WithAlpha(fillAlpha));
+        canvas.StrokePuzzleMask(x, y, palette.Navy.WithAlpha(strokeAlpha));
+
+        if (strong)
+        {
+            canvas.StrokePuzzleMask(x - 1, y - 1, Rgba.White.WithAlpha(112));
+        }
+    }
+
+    private static void DrawPreviewNoise(PixelCanvas canvas, ChallengeSession challenge, Palette palette)
+    {
+        var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"preview:{challenge.Id}"));
+        for (var index = 0; index < 4; index++)
+        {
+            var x = 54 + (bytes[index] % 238);
+            var y = 38 + (bytes[index + 4] % 96);
+            canvas.FillCircle(x, y, 7 + (bytes[index + 8] % 7), palette.Navy.WithAlpha(20));
+        }
     }
 
     private static Palette PaletteFor(string challengeId)
