@@ -9,8 +9,9 @@
   const closeModal = document.getElementById("closeEmailModal");
   const mailTo = document.getElementById("mailTo");
   const mailSubject = document.getElementById("mailSubject");
-  const verificationLink = document.getElementById("verificationLink");
+  const continueBookingButton = document.getElementById("continueBookingButton");
   const submitButton = document.getElementById("submitBooking");
+  let continueBookingUrl = "";
   const startedAt = performance.now();
   const telemetry = {
     firstInteractionMs: 0,
@@ -50,6 +51,17 @@
   modal.addEventListener("click", (event) => {
     if (event.target === modal) {
       modal.hidden = true;
+    }
+  });
+
+  continueBookingButton.addEventListener("click", () => {
+    if (!continueBookingUrl) {
+      return;
+    }
+
+    const challengeWindow = window.open(continueBookingUrl, "_blank", "noopener");
+    if (challengeWindow) {
+      challengeWindow.opener = null;
     }
   });
 
@@ -98,9 +110,9 @@
       const preview = response.dev_email_preview;
       mailTo.textContent = preview.to;
       mailSubject.textContent = preview.subject;
-      verificationLink.href = preview.verification_link;
+      continueBookingUrl = preview.continue_booking_url;
       modal.hidden = false;
-      verificationLink.focus();
+      continueBookingButton.focus();
       statusLine.textContent = "";
     } catch (error) {
       statusLine.textContent = readableError(error.message);

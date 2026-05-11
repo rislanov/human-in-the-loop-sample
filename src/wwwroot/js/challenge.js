@@ -59,7 +59,7 @@
 
   async function boot() {
     if (!ticket) {
-      showFatal("Verification link is missing.");
+      showFatal("Booking confirmation is missing.");
       return;
     }
 
@@ -78,7 +78,7 @@
     loadingView.hidden = false;
     challengeView.hidden = true;
     slotsView.hidden = true;
-    setPhase("validate");
+    setPhase("select");
     loadingStatus.textContent = "Preparing challenge...";
 
     try {
@@ -303,8 +303,8 @@
   }
 
   function setPhase(phase) {
-    stepper.classList.toggle("validate-phase", phase === "validate");
     stepper.classList.toggle("select-phase", phase === "select");
+    stepper.classList.toggle("validate-phase", phase === "validate");
     stepper.classList.toggle("confirmation-phase", phase === "confirmation");
   }
 
@@ -317,8 +317,8 @@
 
   function readableError(errorCode) {
     const map = {
-      invalid_ticket: "Verification link is invalid or expired.",
-      ticket_expired: "Verification link is invalid or expired.",
+      invalid_ticket: "Booking confirmation is invalid or expired.",
+      ticket_expired: "Booking confirmation is invalid or expired.",
       invalid_state: "This request is no longer in the expected state.",
       invalid_verification_session: "Verification session could not be restored.",
       challenge_expired_or_consumed: "Challenge expired.",

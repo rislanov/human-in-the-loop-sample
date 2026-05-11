@@ -8,10 +8,7 @@
     <form id="bookingForm" class="booking-form" novalidate>
         <div class="form-row">
             <label for="name">Name</label>
-            <div class="control-with-addon">
-                <input id="name" name="name" type="text" autocomplete="name" required />
-                <button class="addon info-addon" type="button" title="Required identity field">i</button>
-            </div>
+            <input id="name" name="name" type="text" autocomplete="name" required />
         </div>
 
         <div class="form-row">
@@ -24,18 +21,12 @@
 
         <div class="form-row">
             <label for="numberOfApplicants">Number of applicants</label>
-            <div class="control-with-addon">
-                <input id="numberOfApplicants" name="numberOfApplicants" type="number" min="1" max="8" value="1" required />
-                <button class="addon info-addon" type="button" title="Applicants in this booking">i</button>
-            </div>
+            <input id="numberOfApplicants" name="numberOfApplicants" type="number" min="1" max="8" value="1" required />
         </div>
 
         <div class="form-row">
             <label for="phoneNumber">Phone number</label>
-            <div class="control-with-addon">
-                <input id="phoneNumber" name="phoneNumber" type="tel" placeholder="e.g. +3612345678" autocomplete="tel" />
-                <button class="addon info-addon" type="button" title="International phone format">i</button>
-            </div>
+            <input id="phoneNumber" name="phoneNumber" type="tel" placeholder="e.g. +3612345678" autocomplete="tel" />
         </div>
 
         <div class="form-row">
@@ -78,7 +69,7 @@
             <span></span>
             <span></span>
         </div>
-        <h1 id="mailTitle">Booking verification</h1>
+        <h1 id="mailTitle">Booking confirmation</h1>
         <dl class="mail-meta">
             <div>
                 <dt>To</dt>
@@ -90,8 +81,11 @@
             </div>
         </dl>
         <div class="mail-body">
-            <p>Your booking request was received. Continue with the verification link below.</p>
-            <a id="verificationLink" class="mail-link" href="#" target="_blank" rel="noopener">Open verification link</a>
+            <p>Dear Sir/Madam!</p>
+            <p>Please continue your appointment booking by pressing the button below. The next step will open in a new tab.</p>
+            <p>Please complete the challenge to confirm that this booking request is being made by a person. Be sure that you have entered the correct data. After the third unsuccessful challenge attempt, the system will be blocked and you will not be able to book an appointment.</p>
+            <button id="continueBookingButton" class="mail-action" type="button">Continue Booking</button>
+            <p class="mail-footnote">This is an automatic message. Please do not reply or send an e-mail to this address.</p>
         </div>
     </div>
 </div>

@@ -38,29 +38,29 @@ input {
 }
 
 .booking-shell {
-  max-width: 1830px;
+  width: min(1040px, 100% - 32px);
   margin: 0 auto;
-  padding: 25px 22px 58px;
+  padding: 30px 0 52px;
 }
 
 .booking-form {
   display: grid;
-  gap: 25px;
+  gap: 14px;
 }
 
 .form-row {
   display: grid;
-  grid-template-columns: minmax(320px, 640px) minmax(360px, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
   align-items: start;
-  column-gap: 20px;
+  column-gap: 18px;
 }
 
 .form-row label {
-  min-height: 70px;
+  min-height: 42px;
   display: flex;
   align-items: center;
   color: #343640;
-  font-size: 34px;
+  font-size: 20px;
   line-height: 1.28;
 }
 
@@ -72,13 +72,13 @@ input {
 .form-row input,
 .control-with-addon input {
   width: 100%;
-  height: 72px;
-  border: 2px solid var(--line);
+  height: 42px;
+  border: 1px solid var(--line);
   border-radius: 0;
   background: var(--field);
   color: #111318;
-  padding: 0 14px;
-  font-size: 32px;
+  padding: 0 7px;
+  font-size: 20px;
   outline: none;
 }
 
@@ -95,7 +95,7 @@ input {
 
 .control-with-addon {
   display: grid;
-  grid-template-columns: 1fr 70px;
+  grid-template-columns: 1fr 58px;
   width: 100%;
 }
 
@@ -104,21 +104,13 @@ input {
 }
 
 .addon {
-  height: 72px;
-  border: 2px solid var(--line);
+  height: 42px;
+  border: 1px solid var(--line);
   border-left: 0;
   background: var(--addon);
   color: #ffffff;
   display: grid;
   place-items: center;
-}
-
-.info-addon {
-  cursor: help;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 40px;
-  font-weight: 700;
-  line-height: 1;
 }
 
 .calendar-addon {
@@ -128,43 +120,43 @@ input {
 
 .calendar-addon::before {
   content: "";
-  width: 34px;
-  height: 31px;
-  border: 3px solid #33343a;
-  border-radius: 5px;
+  width: 22px;
+  height: 20px;
+  border: 2px solid #33343a;
+  border-radius: 4px;
   background:
-    radial-gradient(circle at 8px 13px, #33343a 2px, transparent 3px),
-    radial-gradient(circle at 17px 13px, #33343a 2px, transparent 3px),
-    radial-gradient(circle at 26px 13px, #33343a 2px, transparent 3px),
-    radial-gradient(circle at 8px 23px, #33343a 2px, transparent 3px),
-    radial-gradient(circle at 17px 23px, #33343a 2px, transparent 3px),
-    radial-gradient(circle at 26px 23px, #33343a 2px, transparent 3px);
+    radial-gradient(circle at 5px 8px, #33343a 1.5px, transparent 2px),
+    radial-gradient(circle at 11px 8px, #33343a 1.5px, transparent 2px),
+    radial-gradient(circle at 17px 8px, #33343a 1.5px, transparent 2px),
+    radial-gradient(circle at 5px 15px, #33343a 1.5px, transparent 2px),
+    radial-gradient(circle at 11px 15px, #33343a 1.5px, transparent 2px),
+    radial-gradient(circle at 17px 15px, #33343a 1.5px, transparent 2px);
 }
 
 .calendar-addon::after {
   content: "";
   position: absolute;
-  top: 23px;
-  width: 34px;
-  border-top: 3px solid #33343a;
+  top: 10px;
+  width: 22px;
+  border-top: 2px solid #33343a;
 }
 
 .form-actions {
   display: grid;
-  grid-template-columns: minmax(320px, 640px) minmax(360px, 1fr);
-  column-gap: 20px;
+  grid-template-columns: 340px minmax(0, 1fr);
+  column-gap: 18px;
   align-items: center;
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .primary-button {
   grid-column: 2;
-  height: 80px;
+  height: 54px;
   border: 0;
   border-radius: 0;
   background: var(--navy);
   color: #ffffff;
-  font-size: 34px;
+  font-size: 22px;
   font-weight: 700;
   cursor: pointer;
 }
@@ -287,22 +279,35 @@ input {
 }
 
 .mail-body p {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
   color: #34404b;
   font-size: 18px;
   line-height: 1.45;
 }
 
-.mail-link {
+.mail-action {
   display: inline-flex;
   align-items: center;
   min-height: 48px;
   padding: 0 20px;
+  border: 0;
   border-radius: 4px;
   background: var(--navy);
   color: #ffffff;
+  font: inherit;
   font-weight: 700;
-  text-decoration: none;
+  cursor: pointer;
+}
+
+.mail-action:hover,
+.mail-action:focus-visible {
+  background: #102f49;
+}
+
+.mail-body .mail-footnote {
+  margin: 22px 0 0;
+  color: #6a7480;
+  font-size: 15px;
 }
 
 .verification-shell {

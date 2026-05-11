@@ -1,12 +1,12 @@
 ﻿@page "/confirm-booking"
 @model HumanLoopBooking.Pages.ConfirmBookingModel
 @{
-    ViewData["Title"] = "Validate booking";
+    ViewData["Title"] = "Select a date";
     var ticket = Request.Query["t"].ToString();
 }
 
 <section class="verification-shell" data-page="verification" data-ticket="@ticket">
-    <div id="stepper" class="stepper validate-phase" aria-label="Booking progress">
+    <div id="stepper" class="stepper select-phase" aria-label="Booking progress">
         <div class="step complete">
             <span>1</span>
             <strong>Booking data</strong>
@@ -26,12 +26,12 @@
     </div>
 
     <section id="loadingView" class="verification-panel">
-        <p id="loadingStatus" class="status-line strong">Opening verification session...</p>
+        <p id="loadingStatus" class="status-line strong">Opening booking session...</p>
     </section>
 
     <section id="challengeView" class="verification-panel challenge-panel" hidden>
         <div class="challenge-header">
-            <h1>Validate</h1>
+            <h1>Select a date</h1>
             <p id="challengeStatus" class="status-line" role="status"></p>
         </div>
 
@@ -42,7 +42,7 @@
             </div>
             <div id="sliderTrack" class="slider-track">
                 <div id="sliderProgress" class="slider-progress"></div>
-                <button id="sliderHandle" class="slider-handle" type="button" title="Verify alignment">
+                <button id="sliderHandle" class="slider-handle" type="button" title="Slide to continue">
                     <span></span>
                 </button>
             </div>

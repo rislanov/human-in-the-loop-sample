@@ -187,7 +187,7 @@ public sealed class FinalizeBookingRequest
 public sealed record EmailPreview(
     [property: JsonPropertyName("to")] string To,
     [property: JsonPropertyName("subject")] string Subject,
-    [property: JsonPropertyName("verification_link")] string VerificationLink,
+    [property: JsonPropertyName("continue_booking_url")] string ContinueBookingUrl,
     [property: JsonPropertyName("expires_at")] DateTimeOffset ExpiresAt);
 
 public sealed record RenderPayload(

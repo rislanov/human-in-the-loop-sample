@@ -84,7 +84,7 @@ public sealed class BookingFlowStore
 
             var preview = new EmailPreview(
                 email,
-                "Booking verification link",
+                "Booking confirmation",
                 $"{baseUrl}/confirm-booking?t={Uri.EscapeDataString(ticket)}",
                 intent.ExpiresAt);
 
