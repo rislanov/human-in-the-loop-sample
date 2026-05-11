@@ -338,8 +338,8 @@ Example response:
   "type": "slider",
   "expires_in_seconds": 120,
   "render_payload": {
-    "background_image_url": "/api/v1/challenge/assets/bg/ch_123",
-    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123",
+    "background_image_url": "/api/v1/challenge/assets/bg/ch_123?phase=preview&asset_token=at_...",
+    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123?asset_token=at_...",
     "ui_config": {
       "width": 320,
       "height": 160
@@ -795,11 +795,13 @@ Response:
 ```json
 {
   "status": "email_confirmed",
-  "verification_session_id": "public_session_descriptor"
+  "session_nonce": "sn_..."
 }
 ```
 
-The actual verification session should also be bound to secure server-side state and/or an HTTP-only cookie.
+The verification session id is set only in the HttpOnly
+`__booking_verification` cookie. JavaScript receives only the nonce, which must
+be sent as `X-Booking-Session-Nonce` on protected API calls.
 
 ---
 
@@ -813,7 +815,7 @@ Request:
 
 ```json
 {
-  "verification_session_id": "public_session_descriptor"
+  "browser": { "web_driver": false }
 }
 ```
 
@@ -825,8 +827,8 @@ Response:
   "type": "slider",
   "expires_in_seconds": 120,
   "render_payload": {
-    "background_image_url": "/api/v1/challenge/assets/bg/ch_123",
-    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123",
+    "background_image_url": "/api/v1/challenge/assets/bg/ch_123?phase=preview&asset_token=at_...",
+    "piece_image_url": "/api/v1/challenge/assets/piece/ch_123?asset_token=at_...",
     "ui_config": {
       "width": 320,
       "height": 160
@@ -1194,17 +1196,31 @@ This section describes the current .NET 10 / Razor sample implementation in
   flow.
 - Opaque email tickets stored server-side.
 - Email confirmation exchange for a short-lived browser verification session.
-- HTTP-only verification session cookie plus frontend session nonce header.
+- Cookie-only verification session id: JavaScript receives only the frontend
+  session nonce and all protected API calls resolve session state from
+  `__booking_verification` + `X-Booking-Session-Nonce`.
 - One-time challenge sessions with short TTL.
+- Session-bound, short-lived asset tokens for challenge preview, piece, active,
+  and follow-up images.
 - One-time validation tokens for slot access and booking finalization.
+- Central `EnforcementMode` (`Shadow`, `RetryOnly`, `CooldownOnly`, `Full`) with
+  default `Shadow` and audit logging of applied vs would-have risk decisions.
 - Slot selection only after successful challenge verification.
 - Atomic in-memory booking finalization for the demo slot list.
 - Multi-dimensional rate limits for email creation, challenge init, challenge
   verify, validation-token issuance, and slot pressure.
-- In-memory state store wrapped behind `IDistributedCacheService`, with comments
-  marking where a Redis implementation must provide atomic operations.
+- In-memory state store wrapped behind `ITemporarySecurityStateStore`, whose
+  contract exposes Redis-safe semantics such as increment-with-expiry,
+  compare-and-set, set-if-not-exists, and consume-once. Comments mark where a
+  Redis implementation must use Lua scripts, transactions, or `SET NX EX`.
+- Slot-group pressure policy that shortens validation-token TTLs, limits slot
+  availability reads, logs high pressure, and binds tokens to the first queried
+  slot group.
 - Security audit events with hashed/coarse identifiers and risk signals.
 - Origin check for same-site API POST requests.
+- Automated xUnit test project covering session binding, asset binding,
+  challenge protocol bypasses, validation token scope, rate limits, enforcement
+  modes, and consume-once concurrency.
 
 ### Implemented Custom Interactive Challenge
 
@@ -1226,9 +1242,14 @@ The challenge protocol includes:
 - Challenge variants:
   - `reveal_target`;
   - `shift_after_start`;
-  - `hold_and_release`.
+  - `hold_and_release`;
+  - `follow_up_shift`.
 - Server-owned target coordinate, tolerance, variant, phase nonce, and timing.
-- Client telemetry with drag phases and `pre_active` / `active` state markers.
+- `follow_up_shift` adds a second lifecycle endpoint,
+  `/api/v1/challenge/follow-up`, a follow-up nonce, a final target, a
+  randomized follow-up delay, and mandatory post-follow-up movement.
+- Client telemetry with drag phases and `pre_active` / `active` / `follow_up`
+  state markers.
 - Second-plane slider movement used as a risk signal.
 - Coarse trajectory fingerprinting to detect repeated traces without storing raw
   high-resolution telemetry.
@@ -1244,18 +1265,20 @@ source, not as proof of humanity.
   challenge protocol. Production deployment should either evaluate a vetted
   open-source component or keep the custom protocol with a clear maintenance and
   QA budget.
-- Risk enforcement is active in the sample. The design recommends shadow-mode
-  calibration before production enforcement.
+- Risk enforcement is controlled by `BotDefense:EnforcementMode` and defaults to
+  `Shadow`, so production hard deny is impossible unless `Full` is explicitly
+  configured.
 
 ### Not Yet Implemented
 
-- Redis-backed `IDistributedCacheService`.
+- Redis-backed `ITemporarySecurityStateStore`; the in-memory implementation is
+  still process-local and exists only for the sample.
 - Production database persistence for booking intents, audit logs, and slots.
-- Shadow mode, enforcement kill switches, and staged rollout controls.
+- Runtime kill switches and an operator UI for staged rollout beyond the
+  configuration-based enforcement mode.
 - Admin authentication/authorization for audit endpoints.
 - ASN / reputation enrichment and production metrics dashboards.
 - Dedicated mobile/touch calibration across iOS, Android, and common browsers.
-- Automated unit/integration test project.
 - Progressive slot inventory release, slot holds, or delayed inventory exposure.
 - Non-enumerating production response for email rate limiting. The API still
   returns `email_rate_limited` in this demo for development visibility.

@@ -10,6 +10,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
 });
+builder.Services.Configure<BotDefenseOptions>(builder.Configuration.GetSection("BotDefense"));
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Security subsystem registrations. These interfaces are the seams that make
@@ -20,8 +21,8 @@ builder.Services.AddSingleton<IChallengeProtocolValidator, ChallengeProtocolVali
 builder.Services.AddSingleton<IRiskEngine, RiskEngine>();
 builder.Services.AddSingleton<IChallengeSessionFactory, InteractiveChallengeSessionFactory>();
 // Demo-only backing store. Swap this registration for a Redis-backed
-// IDistributedCacheService before running multiple app instances.
-builder.Services.AddSingleton<IDistributedCacheService, InMemoryDistributedCacheService>();
+// ITemporarySecurityStateStore before running multiple app instances.
+builder.Services.AddSingleton<ITemporarySecurityStateStore, InMemoryTemporarySecurityStateStore>();
 builder.Services.AddSingleton<BookingFlowStore>();
 builder.Services.AddSingleton<IChallengeAssetRenderer, ChallengeAssetRenderer>();
 
@@ -98,7 +99,6 @@ app.MapPost("/api/v1/verification/email/confirm", (ConfirmEmailRequest request, 
     return Results.Ok(new
     {
         Status = "email_confirmed",
-        VerificationSessionId = value.VerificationSessionId,
         SessionNonce = value.SessionNonce
     });
 });
@@ -119,8 +119,8 @@ app.MapPost("/api/v1/challenge/init", (InitChallengeRequest request, HttpContext
         Type = "slider",
         ExpiresInSeconds = 120,
         RenderPayload = new RenderPayload(
-            $"/api/v1/challenge/assets/bg/{Uri.EscapeDataString(challenge.Id)}",
-            $"/api/v1/challenge/assets/piece/{Uri.EscapeDataString(challenge.Id)}",
+            store.CreateAssetUrl(challenge, "bg", "preview"),
+            store.CreateAssetUrl(challenge, "piece", "piece"),
             ToRenderUiConfig(challenge))
     });
 });
@@ -141,25 +141,44 @@ app.MapPost("/api/v1/challenge/start", (StartChallengeRequest request, HttpConte
         ChallengeId = challenge.Id,
         PhaseNonce = challenge.PhaseNonce,
         ActivationDelayMs = challenge.ActivationDelayMs,
-        ActiveBackgroundImageUrl = $"/api/v1/challenge/assets/bg/{Uri.EscapeDataString(challenge.Id)}?phase=active",
+        ActiveBackgroundImageUrl = store.CreateAssetUrl(challenge, "bg", "active"),
+        UiConfig = ToRenderUiConfig(challenge)
+    });
+});
+
+app.MapPost("/api/v1/challenge/follow-up", (FollowUpChallengeRequest request, HttpContext http, BookingFlowStore store) =>
+{
+    http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
+    var result = store.StartFollowUpChallenge(request, cookieSessionId, BuildSecurityContext(http, request.Browser));
+
+    if (!result.Success || result.Value is not { } challenge)
+    {
+        return Results.BadRequest(new { Error = result.ErrorCode });
+    }
+
+    return Results.Ok(new
+    {
+        Status = "follow_up_started",
+        ChallengeId = challenge.Id,
+        FollowUpNonce = challenge.FollowUpNonce,
+        FollowUpDelayMs = challenge.FollowUpDelayMs,
+        FollowUpBackgroundImageUrl = store.CreateAssetUrl(challenge, "bg", "follow_up"),
         UiConfig = ToRenderUiConfig(challenge)
     });
 });
 
 app.MapGet("/api/v1/challenge/assets/bg/{challengeId}", (string challengeId, HttpContext http, BookingFlowStore store, IChallengeAssetRenderer renderer) =>
 {
-    var result = store.GetChallengeForAsset(challengeId);
-    if (!result.Success || result.Value is not { } challenge)
-    {
-        return Results.NotFound();
-    }
-
+    http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
+    var assetToken = http.Request.Query.TryGetValue("asset_token", out var tokenValues)
+        ? tokenValues.ToString()
+        : null;
     var phase = http.Request.Query.TryGetValue("phase", out var phaseValues)
         ? phaseValues.ToString()
         : "";
 
-    if (string.Equals(phase, "active", StringComparison.OrdinalIgnoreCase) &&
-        challenge.StartedAt is null)
+    var result = store.GetChallengeForAsset(challengeId, phase, assetToken, cookieSessionId);
+    if (!result.Success || result.Value is not { } challenge)
     {
         return Results.NotFound();
     }
@@ -167,9 +186,13 @@ app.MapGet("/api/v1/challenge/assets/bg/{challengeId}", (string challengeId, Htt
     return Results.Bytes(renderer.RenderBackground(challenge, phase), "image/png");
 });
 
-app.MapGet("/api/v1/challenge/assets/piece/{challengeId}", (string challengeId, BookingFlowStore store, IChallengeAssetRenderer renderer) =>
+app.MapGet("/api/v1/challenge/assets/piece/{challengeId}", (string challengeId, HttpContext http, BookingFlowStore store, IChallengeAssetRenderer renderer) =>
 {
-    var result = store.GetChallengeForAsset(challengeId);
+    http.Request.Cookies.TryGetValue(BookingFlowStore.VerificationCookieName, out var cookieSessionId);
+    var assetToken = http.Request.Query.TryGetValue("asset_token", out var tokenValues)
+        ? tokenValues.ToString()
+        : null;
+    var result = store.GetChallengePieceForAsset(challengeId, assetToken, cookieSessionId);
     return result.Success && result.Value is not null
         ? Results.Content(renderer.RenderPiece(result.Value), "image/svg+xml; charset=utf-8")
         : Results.NotFound();
@@ -234,7 +257,8 @@ static RenderUiConfig ToRenderUiConfig(ChallengeSession challenge)
         challenge.StripeOffset,
         challenge.ActivationDelayMs,
         challenge.Variant,
-        challenge.HoldRequirementMs);
+        challenge.HoldRequirementMs,
+        challenge.FollowUpDelayMs);
 }
 
 static RequestSecurityContext BuildSecurityContext(HttpContext http, BrowserSignals? browser)
@@ -249,4 +273,8 @@ static RequestSecurityContext BuildSecurityContext(HttpContext http, BrowserSign
         SecurityHelpers.HashDevice(browser),
         string.IsNullOrWhiteSpace(nonce) ? null : nonce,
         http.Request.Headers.UserAgent.ToString());
+}
+
+public partial class Program
+{
 }

@@ -102,7 +102,7 @@ public sealed class RiskEngine : IRiskEngine
                 risk += 15;
             }
 
-            var exactError = Math.Abs(solution.X - challenge.TargetX);
+            var exactError = Math.Abs(solution.X - EffectiveTargetX(challenge));
             if (exactError == 0 && solution.TimeSpentMs < 1000)
             {
                 risk += 8;
@@ -196,6 +196,13 @@ public sealed class RiskEngine : IRiskEngine
         }
 
         return risk;
+    }
+
+    private static int EffectiveTargetX(ChallengeSession challenge)
+    {
+        return challenge.Variant == ChallengeVariants.FollowUpShift
+            ? challenge.FollowUpTargetX
+            : challenge.TargetX;
     }
 
     private static (string Decision, string ReasonCode) Decide(int risk, bool acceptedSolution, int previousFailures)

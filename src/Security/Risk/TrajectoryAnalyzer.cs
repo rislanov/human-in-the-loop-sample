@@ -143,7 +143,7 @@ public sealed class TrajectoryAnalyzer : ITrajectoryAnalyzer
                 }
             }
 
-            var exactTargetError = Math.Abs(solution.X - challenge.TargetX);
+            var exactTargetError = Math.Abs(solution.X - EffectiveTargetX(challenge));
             if (!isTouch &&
                 exactTargetError <= 1 &&
                 correctionCount == 0 &&
@@ -197,7 +197,7 @@ public sealed class TrajectoryAnalyzer : ITrajectoryAnalyzer
             yRange <= 1 &&
             straightness < 1.01 &&
             correctionCount == 0 &&
-            Math.Abs(solution.X - challenge.TargetX) <= 1)
+            Math.Abs(solution.X - EffectiveTargetX(challenge)) <= 1)
         {
             // This is the classic naive browser-agent shape: find the right X, then
             // move there in one clean horizontal line with no second-plane behavior.
@@ -277,6 +277,13 @@ public sealed class TrajectoryAnalyzer : ITrajectoryAnalyzer
                 return new TrajectorySegment(dx, dy, dt, distance);
             })
             .ToArray();
+    }
+
+    private static int EffectiveTargetX(ChallengeSession challenge)
+    {
+        return challenge.Variant == ChallengeVariants.FollowUpShift
+            ? challenge.FollowUpTargetX
+            : challenge.TargetX;
     }
 
     private static int CountDirectionChanges(IReadOnlyList<TrajectorySegment> segments)
