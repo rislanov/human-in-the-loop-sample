@@ -108,11 +108,14 @@ Main state objects:
 - `BookingIntent`: the user's booking request, email hash, current status,
   attempt counters, and accumulated risk context.
 - `VerificationSession`: a short-lived browser session created after the email
-  ticket is opened. It is bound to an HttpOnly cookie and a frontend nonce.
+  ticket is opened. Its id is cookie-only: JavaScript never receives it. Same
+  site API calls are bound with the HttpOnly cookie plus the
+  `X-Booking-Session-Nonce` header.
 - `ChallengeSession`: a one-time slider challenge with server-owned target,
-  tolerance, variant, phase nonce, and timing.
+  tolerance, variant, phase nonce, follow-up nonce when needed, and timing.
 - `ValidationGrant`: a short-lived token that unlocks slot selection and
-  finalization after a successful challenge.
+  finalization after a successful challenge. It is bound to the verification
+  session/device and to the first queried slot group.
 
 ## Security Design Principles
 
@@ -166,13 +169,14 @@ intent, email hash, verification session, and coarse device hash.
 
 ## Custom Interactive Challenge
 
-The challenge currently has three variants:
+The challenge currently has four variants:
 
 | Variant | Purpose |
 | --- | --- |
 | `reveal_target` | The target is visually revealed only after the active phase starts. |
 | `shift_after_start` | The preview target differs from the real target, forcing post-start correction. |
 | `hold_and_release` | The user must align, pause briefly, then release after a server-chosen hold window. |
+| `follow_up_shift` | After `/start`, the target changes again through `/challenge/follow-up`; the user must make a real post-follow-up correction. |
 
 Challenge parameters are randomized per session:
 
@@ -185,6 +189,8 @@ Challenge parameters are randomized per session:
 - stripe/noise offset;
 - active-phase delay;
 - hold requirement.
+- follow-up target, delay, nonce, and required post-follow-up adjustment for
+  `follow_up_shift`.
 
 The challenge also has a second movement plane: the handle can move slightly on
 the Y axis. The horizontal position still solves the puzzle, but the Y-axis
@@ -217,6 +223,12 @@ POST /api/v1/challenge/init
 
 The server validates the verification session, rate limits challenge creation,
 creates a one-time `ChallengeSession`, and returns render-safe payload only.
+The request does not include `verification_session_id`; the server resolves the
+session from the HttpOnly cookie and the `X-Booking-Session-Nonce` header.
+
+Returned asset URLs contain short-lived asset tokens bound to the challenge id,
+verification session id, phase, and current cookie session. A copied image URL
+without the matching session cookie or after token expiry returns 404.
 
 ### 2. Start Interaction
 
@@ -231,7 +243,21 @@ URL.
 Motivation: a script should not be able to generate an offline answer without
 starting an interaction lifecycle.
 
-### 3. Verify
+### 3. Optional Follow-Up
+
+```text
+POST /api/v1/challenge/follow-up
+```
+
+Only `follow_up_shift` uses this call. It requires the current session cookie,
+nonce header, challenge id, and phase nonce. The server creates a follow-up
+nonce, schedules the final visual state, and returns a signed follow-up asset
+URL.
+
+Motivation: this forces automation to remain inside the active interaction loop
+and react to a second server-marked visual change.
+
+### 4. Verify
 
 ```text
 POST /api/v1/challenge/verify
@@ -242,6 +268,8 @@ The challenge is consumed immediately. The server then evaluates:
 - whether final X is within the server-owned tolerance;
 - whether the lifecycle protocol was satisfied;
 - whether the reported phase nonce matches;
+- whether the follow-up nonce and post-follow-up movement exist for
+  `follow_up_shift`;
 - whether active time and hold timing are plausible;
 - whether telemetry contains required active-phase adjustment;
 - trajectory heuristics;
@@ -254,6 +282,15 @@ The result is one of:
 - `retry_challenge`: let the user try a fresh challenge after cooldown;
 - `temporarily_denied`: stop this flow for a while;
 - `hard_denied`: deny the current ticket/session.
+
+The applied decision is controlled by `BotDefense:EnforcementMode`:
+
+| Mode | Behavior |
+| --- | --- |
+| `Shadow` | Always applies `allow`, while audit logs the real would-have decision. This is the default. |
+| `RetryOnly` | Allows normal passes and applies retry, but suppresses temporary/hard denies. |
+| `CooldownOnly` | Applies retry and temporary deny; converts hard deny to temporary deny. |
+| `Full` | Applies the risk engine decision exactly. |
 
 ## Trajectory Heuristics
 
@@ -340,16 +377,20 @@ in shadow mode using real production traffic.
 - validation tokens per email, IP, and device;
 - slot finalizations per slot group;
 - slot finalizations per individual slot.
+- slot-group pressure snapshots that shorten validation-token TTLs, reduce slot
+  list access, and bind validation tokens to the first queried slot group.
 
 The motivation is to reduce scale. A single CAPTCHA bypass should not grant the
 ability to mass-reserve or repeatedly attack scarce slots.
 
 Current implementation:
 
-- `src/Services/IDistributedCacheService.cs` defines the temporary-state
-  abstraction.
-- `src/Services/InMemoryDistributedCacheService.cs` is a demo implementation.
-  Its comments mark where Redis must provide atomic operations.
+- `src/Services/ITemporarySecurityStateStore.cs` defines Redis-shaped atomic
+  semantics: `SetIfNotExists`, `CompareAndSet`, `TryConsumeOnce`, and
+  `IncrementWithExpiry`.
+- `src/Services/InMemoryTemporarySecurityStateStore.cs` is a demo
+  implementation. Its comments mark where Redis must provide Lua/transactional
+  equivalents before multi-replica deployment.
 
 ## Interesting Files
 
@@ -420,7 +461,7 @@ services.AddSingleton<IChallengeAssetRenderer, ChallengeAssetRenderer>();
 ```
 
 3. Implement production state storage behind a Redis-backed service equivalent
-   to `IDistributedCacheService`.
+   to `ITemporarySecurityStateStore`.
 4. Build your own application-specific flow around the security layer:
    create intent, confirm email, initialize challenge, start interaction, verify
    challenge, issue short-lived grant, then unlock the protected action.
@@ -547,9 +588,11 @@ and high-risk traffic volume.
 Why: this system depends on calibration. Without metrics, you cannot know
 whether it is stopping bots, hurting real users, or simply adding friction.
 
-### 8. Add Automated Tests
+### 8. Expand Automated Tests
 
-Create unit tests for:
+The repository now contains unit and integration tests for protocol bypasses,
+session binding, signed assets, enforcement modes, token consumption, rate
+limits, slot pressure, and concurrency. Keep expanding them with:
 
 - challenge protocol validation;
 - trajectory heuristics;
@@ -559,7 +602,8 @@ Create unit tests for:
 - rate limit counters;
 - slot finalization.
 
-Add browser tests for desktop and mobile flows.
+Add browser tests for desktop and mobile flows, plus a Redis-backed integration
+suite once the Redis adapter exists.
 
 Why: small changes to heuristics can accidentally block real users or reopen an
 automation path. Tests give confidence while the challenge evolves.

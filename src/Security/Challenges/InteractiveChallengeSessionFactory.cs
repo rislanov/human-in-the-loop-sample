@@ -16,6 +16,9 @@ public sealed class InteractiveChallengeSessionFactory : IChallengeSessionFactor
     {
         var targetX = RandomNumberGenerator.GetInt32(126, 288);
         var variant = PickVariant(currentRiskScore);
+        var followUpTargetX = variant == ChallengeVariants.FollowUpShift
+            ? PickFollowUpTarget(targetX)
+            : 0;
 
         return new ChallengeSession
         {
@@ -42,6 +45,17 @@ public sealed class InteractiveChallengeSessionFactory : IChallengeSessionFactor
             ActivationDelayMs = RandomNumberGenerator.GetInt32(220, 421),
             HoldRequirementMs = variant == ChallengeVariants.HoldAndRelease
                 ? RandomNumberGenerator.GetInt32(420, 721)
+                : 0,
+
+            // Follow-up challenges deliberately split the visual answer into two
+            // active states. The browser sees an initial target after pointerdown,
+            // then a later shift that requires another adjustment before release.
+            FollowUpTargetX = followUpTargetX,
+            FollowUpDelayMs = variant == ChallengeVariants.FollowUpShift
+                ? RandomNumberGenerator.GetInt32(350, 901)
+                : 0,
+            RequiredPostFollowUpAdjustmentPx = variant == ChallengeVariants.FollowUpShift
+                ? RandomNumberGenerator.GetInt32(10, 17)
                 : 0
         };
     }
@@ -56,17 +70,19 @@ public sealed class InteractiveChallengeSessionFactory : IChallengeSessionFactor
         {
             return roll switch
             {
-                < 45 => ChallengeVariants.ShiftAfterStart,
-                < 75 => ChallengeVariants.HoldAndRelease,
+                < 38 => ChallengeVariants.FollowUpShift,
+                < 64 => ChallengeVariants.ShiftAfterStart,
+                < 84 => ChallengeVariants.HoldAndRelease,
                 _ => ChallengeVariants.RevealTarget
             };
         }
 
         return roll switch
         {
-            < 45 => ChallengeVariants.RevealTarget,
-            < 78 => ChallengeVariants.ShiftAfterStart,
-            _ => ChallengeVariants.HoldAndRelease
+            < 38 => ChallengeVariants.RevealTarget,
+            < 64 => ChallengeVariants.ShiftAfterStart,
+            < 84 => ChallengeVariants.HoldAndRelease,
+            _ => ChallengeVariants.FollowUpShift
         };
     }
 
@@ -82,5 +98,19 @@ public sealed class InteractiveChallengeSessionFactory : IChallengeSessionFactor
         }
 
         return canShiftLeft ? targetX - shift : targetX + shift;
+    }
+
+    private static int PickFollowUpTarget(int initialTargetX)
+    {
+        var shift = RandomNumberGenerator.GetInt32(24, 57);
+        var canShiftLeft = initialTargetX - shift >= 88;
+        var canShiftRight = initialTargetX + shift <= 306;
+
+        if (canShiftLeft && canShiftRight)
+        {
+            return initialTargetX + (RandomNumberGenerator.GetInt32(0, 2) == 0 ? -shift : shift);
+        }
+
+        return canShiftLeft ? initialTargetX - shift : initialTargetX + shift;
     }
 }

@@ -15,9 +15,11 @@ public sealed class BookingFlowStore
     private static readonly TimeSpan VerificationSessionTtl = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan ChallengeTtl = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan ValidationTokenTtl = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan AssetTokenTtl = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan EmailSendWindow = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan AbuseWindow = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SlotPressureWindow = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan SlotPressureSnapshotTtl = TimeSpan.FromMinutes(5);
 
     private const int MaxEmailSendsPerEmail = 1;
     private const int MaxEmailSendsPerIp = 8;
@@ -32,24 +34,27 @@ public sealed class BookingFlowStore
     private const int MaxValidationTokensPerDevice = 5;
     private const int MaxSlotGroupFinalizationsPerWindow = 8;
     private const int MaxSingleSlotFinalizationsPerWindow = 3;
+    private const string DefaultSlotGroup = "serbian-permit-july-2026";
 
     private const string SlotsKey = "booking:slots";
     private const string AuditKey = "booking:audit";
 
-    private readonly IDistributedCacheService _cache;
+    private readonly ITemporarySecurityStateStore _cache;
     private readonly IRiskEngine _riskEngine;
     private readonly IChallengeSessionFactory _challengeFactory;
     private readonly IChallengeProtocolValidator _challengeProtocolValidator;
     private readonly TimeProvider _clock;
     private readonly ILogger<BookingFlowStore> _logger;
+    private readonly BotDefenseOptions _options;
 
     public BookingFlowStore(
-        IDistributedCacheService cache,
+        ITemporarySecurityStateStore cache,
         IRiskEngine riskEngine,
         IChallengeSessionFactory challengeFactory,
         IChallengeProtocolValidator challengeProtocolValidator,
         TimeProvider clock,
-        ILogger<BookingFlowStore> logger)
+        ILogger<BookingFlowStore> logger,
+        Microsoft.Extensions.Options.IOptions<BotDefenseOptions> options)
     {
         _cache = cache;
         _riskEngine = riskEngine;
@@ -57,6 +62,7 @@ public sealed class BookingFlowStore
         _challengeProtocolValidator = challengeProtocolValidator;
         _clock = clock;
         _logger = logger;
+        _options = options.Value;
 
         lock (_cache.SyncRoot)
         {
@@ -154,7 +160,7 @@ public sealed class BookingFlowStore
 
             if (now > intent.ExpiresAt)
             {
-                _cache.Remove(TicketKey(request.Ticket));
+                _cache.Delete(TicketKey(request.Ticket));
                 return StoreResult<(BookingIntent Intent, string VerificationSessionId, string SessionNonce)>.Fail("ticket_expired");
             }
 
@@ -191,7 +197,7 @@ public sealed class BookingFlowStore
         string? cookieSessionId,
         RequestSecurityContext context)
     {
-        var sessionResult = ResolveSession(request.VerificationSessionId, cookieSessionId, context);
+        var sessionResult = ResolveSession(cookieSessionId, context);
         if (!sessionResult.Success)
         {
             return StoreResult<ChallengeSession>.Fail(sessionResult.ErrorCode);
@@ -235,6 +241,7 @@ public sealed class BookingFlowStore
             intent.Status = BookingIntentStatus.ChallengeStarted;
             SaveIntent(intent);
             _cache.Set(ChallengeKey(challenge.Id), challenge, ChallengeTtl);
+            _cache.SetIfNotExists(ChallengeConsumeKey(challenge.Id), new CacheReference(challenge.Id), ChallengeTtl);
 
             Audit("challenge_initialized", intent, challenge.Id, Bucket(intent.RiskScore), intent.RiskScore, "challenge_started", "One-time slider challenge created.", context);
             return StoreResult<ChallengeSession>.Ok(challenge);
@@ -279,14 +286,22 @@ public sealed class BookingFlowStore
 
             if (string.IsNullOrWhiteSpace(challenge.PhaseNonce))
             {
-                challenge.PhaseNonce = SecurityHelpers.NewToken("cp");
-                challenge.StartedAt = now;
-                challenge.ActivatedAt = now.AddMilliseconds(challenge.ActivationDelayMs);
+                var started = challenge with
+                {
+                    PhaseNonce = SecurityHelpers.NewToken("cp"),
+                    StartedAt = now,
+                    ActivatedAt = now.AddMilliseconds(challenge.ActivationDelayMs)
+                };
 
-                // The start mark is deliberately server-side. A Redis implementation
-                // should write it with compare-and-set semantics so a challenge cannot
-                // be forked into multiple parallel interaction lifecycles.
-                _cache.Set(ChallengeKey(challenge.Id), challenge, RemainingTtl(challenge.ExpiresAt, now));
+                // The start mark is deliberately server-side. Compare-and-set is
+                // the production semantic we want from Redis here: only one caller
+                // may create the lifecycle nonce for this challenge.
+                if (!_cache.CompareAndSet(ChallengeKey(challenge.Id), challenge, started, RemainingTtl(challenge.ExpiresAt, now)))
+                {
+                    return StoreResult<ChallengeSession>.Fail("invalid_challenge_lifecycle");
+                }
+
+                challenge = started;
                 Audit("challenge_interaction_started", intent, challenge.Id, Bucket(intent.RiskScore), intent.RiskScore, "interaction_started", "Slider interaction lifecycle started.", context);
             }
 
@@ -294,13 +309,171 @@ public sealed class BookingFlowStore
         }
     }
 
-    public StoreResult<ChallengeSession> GetChallengeForAsset(string challengeId)
+    public StoreResult<ChallengeSession> StartFollowUpChallenge(
+        FollowUpChallengeRequest request,
+        string? cookieSessionId,
+        RequestSecurityContext context)
+    {
+        if (string.IsNullOrWhiteSpace(request.ChallengeId) ||
+            string.IsNullOrWhiteSpace(request.PhaseNonce))
+        {
+            return StoreResult<ChallengeSession>.Fail("missing_challenge");
+        }
+
+        var now = _clock.GetUtcNow();
+        lock (_cache.SyncRoot)
+        {
+            if (!_cache.TryGet<ChallengeSession>(ChallengeKey(request.ChallengeId), out var challenge) ||
+                challenge is null ||
+                !TryGetIntent(challenge.IntentId, out var intent))
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            }
+
+            var sessionResult = ResolveSessionLocked(challenge.VerificationSessionId, cookieSessionId, context);
+            if (!sessionResult.Success)
+            {
+                return StoreResult<ChallengeSession>.Fail(sessionResult.ErrorCode);
+            }
+
+            if (challenge.Variant != ChallengeVariants.FollowUpShift ||
+                challenge.StartedAt is null ||
+                string.IsNullOrWhiteSpace(challenge.PhaseNonce) ||
+                !string.Equals(request.PhaseNonce, challenge.PhaseNonce, StringComparison.Ordinal))
+            {
+                return StoreResult<ChallengeSession>.Fail("invalid_challenge_lifecycle");
+            }
+
+            if (challenge.Consumed || now > challenge.ExpiresAt)
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_expired_or_consumed");
+            }
+
+            if (string.IsNullOrWhiteSpace(challenge.FollowUpNonce))
+            {
+                var followed = challenge with
+                {
+                    FollowUpNonce = SecurityHelpers.NewToken("fu"),
+                    FollowUpActivatedAt = now.AddMilliseconds(challenge.FollowUpDelayMs)
+                };
+
+                // The follow-up mark prevents a cheap bypass where automation
+                // solves the active image once and posts a final answer without
+                // proving that it stayed in the interaction lifecycle.
+                if (!_cache.CompareAndSet(ChallengeKey(challenge.Id), challenge, followed, RemainingTtl(challenge.ExpiresAt, now)))
+                {
+                    return StoreResult<ChallengeSession>.Fail("invalid_challenge_lifecycle");
+                }
+
+                challenge = followed;
+                Audit("challenge_follow_up_started", intent, challenge.Id, Bucket(intent.RiskScore), intent.RiskScore, "follow_up_started", "Follow-up target phase scheduled.", context);
+            }
+
+            return StoreResult<ChallengeSession>.Ok(challenge);
+        }
+    }
+
+    public string CreateAssetUrl(ChallengeSession challenge, string kind, string phase)
+    {
+        var normalizedPhase = NormalizeAssetPhase(kind, phase);
+        var token = SecurityHelpers.NewToken("at");
+        var now = _clock.GetUtcNow();
+        var grant = new AssetTokenGrant
+        {
+            Token = token,
+            ChallengeId = challenge.Id,
+            VerificationSessionId = challenge.VerificationSessionId,
+            Phase = normalizedPhase,
+            CreatedAt = now,
+            ExpiresAt = now.Add(AssetTokenTtl)
+        };
+
+        _cache.Set(AssetTokenKey(token), grant, AssetTokenTtl);
+
+        var escapedChallengeId = Uri.EscapeDataString(challenge.Id);
+        return kind == "piece"
+            ? $"/api/v1/challenge/assets/piece/{escapedChallengeId}?asset_token={Uri.EscapeDataString(token)}"
+            : $"/api/v1/challenge/assets/bg/{escapedChallengeId}?phase={Uri.EscapeDataString(normalizedPhase)}&asset_token={Uri.EscapeDataString(token)}";
+    }
+
+    public StoreResult<ChallengeSession> GetChallengeForAsset(
+        string challengeId,
+        string? phase,
+        string? assetToken,
+        string? cookieSessionId)
     {
         lock (_cache.SyncRoot)
         {
-            return _cache.TryGet<ChallengeSession>(ChallengeKey(challengeId), out var challenge) && challenge is not null
-                ? StoreResult<ChallengeSession>.Ok(challenge)
-                : StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            var normalizedPhase = NormalizeAssetPhase("bg", phase);
+            if (string.IsNullOrWhiteSpace(challengeId) ||
+                string.IsNullOrWhiteSpace(assetToken) ||
+                string.IsNullOrWhiteSpace(cookieSessionId))
+            {
+                return StoreResult<ChallengeSession>.Fail("asset_forbidden");
+            }
+
+            if (!_cache.TryGet<AssetTokenGrant>(AssetTokenKey(assetToken), out var grant) ||
+                grant is null ||
+                _clock.GetUtcNow() > grant.ExpiresAt ||
+                !string.Equals(grant.ChallengeId, challengeId, StringComparison.Ordinal) ||
+                !string.Equals(grant.Phase, normalizedPhase, StringComparison.Ordinal) ||
+                !string.Equals(grant.VerificationSessionId, cookieSessionId, StringComparison.Ordinal))
+            {
+                return StoreResult<ChallengeSession>.Fail("asset_forbidden");
+            }
+
+            if (!_cache.TryGet<ChallengeSession>(ChallengeKey(challengeId), out var challenge) ||
+                challenge is null ||
+                challenge.ExpiresAt <= _clock.GetUtcNow() ||
+                !string.Equals(challenge.VerificationSessionId, cookieSessionId, StringComparison.Ordinal))
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            }
+
+            if (normalizedPhase == "active" && challenge.StartedAt is null)
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            }
+
+            if (normalizedPhase == "follow_up" &&
+                (challenge.Variant != ChallengeVariants.FollowUpShift || string.IsNullOrWhiteSpace(challenge.FollowUpNonce)))
+            {
+                return StoreResult<ChallengeSession>.Fail("challenge_not_found");
+            }
+
+            return StoreResult<ChallengeSession>.Ok(challenge);
+        }
+    }
+
+    public StoreResult<ChallengeSession> GetChallengePieceForAsset(
+        string challengeId,
+        string? assetToken,
+        string? cookieSessionId)
+    {
+        lock (_cache.SyncRoot)
+        {
+            if (string.IsNullOrWhiteSpace(assetToken) ||
+                string.IsNullOrWhiteSpace(cookieSessionId))
+            {
+                return StoreResult<ChallengeSession>.Fail("asset_forbidden");
+            }
+
+            if (!_cache.TryGet<AssetTokenGrant>(AssetTokenKey(assetToken), out var grant) ||
+                grant is null ||
+                _clock.GetUtcNow() > grant.ExpiresAt ||
+                !string.Equals(grant.ChallengeId, challengeId, StringComparison.Ordinal) ||
+                !string.Equals(grant.Phase, "piece", StringComparison.Ordinal) ||
+                !string.Equals(grant.VerificationSessionId, cookieSessionId, StringComparison.Ordinal))
+            {
+                return StoreResult<ChallengeSession>.Fail("asset_forbidden");
+            }
+
+            return _cache.TryGet<ChallengeSession>(ChallengeKey(challengeId), out var challenge) &&
+                challenge is not null &&
+                challenge.ExpiresAt > _clock.GetUtcNow() &&
+                string.Equals(challenge.VerificationSessionId, cookieSessionId, StringComparison.Ordinal)
+                    ? StoreResult<ChallengeSession>.Ok(challenge)
+                    : StoreResult<ChallengeSession>.Fail("challenge_not_found");
         }
     }
 
@@ -335,6 +508,11 @@ public sealed class BookingFlowStore
                 return StoreResult<ChallengeVerifyResult>.Fail("challenge_expired_or_consumed");
             }
 
+            if (!_cache.TryConsumeOnce(ChallengeConsumeKey(challenge.Id)))
+            {
+                return StoreResult<ChallengeVerifyResult>.Fail("challenge_expired_or_consumed");
+            }
+
             if (!TryConsumeOptionalLimit($"rate:challenge-verify:ip:{context.IpHash}", MaxChallengeVerifiesPerIp, AbuseWindow))
             {
                 intent.Status = BookingIntentStatus.TemporarilyDenied;
@@ -343,7 +521,7 @@ public sealed class BookingFlowStore
                 return StoreResult<ChallengeVerifyResult>.Fail("too_many_attempts");
             }
 
-            challenge.Consumed = true;
+            challenge = challenge with { Consumed = true };
             _cache.Set(ChallengeKey(challenge.Id), challenge, RemainingTtl(challenge.ExpiresAt, now));
 
             ApplyDeviceMismatchPenalty(intent, session, context);
@@ -351,13 +529,14 @@ public sealed class BookingFlowStore
             // Verification has two layers: the visual answer must be close enough,
             // and the interactive protocol must have been completed. The risk engine
             // then decides whether that accepted solution is enough for this session.
-            var xAccurate = Math.Abs(request.Solution.X - challenge.TargetX) <= challenge.Tolerance;
+            var xAccurate = Math.Abs(request.Solution.X - EffectiveTargetX(challenge)) <= challenge.Tolerance;
             var protocol = _challengeProtocolValidator.Assess(challenge, request.Solution, request.Telemetry);
             var acceptedSolution = xAccurate && protocol.IsSatisfied;
             var risk = _riskEngine.ScoreChallenge(intent, challenge, request, acceptedSolution, protocol);
+            var enforced = BotDefensePolicy.Apply(risk.Decision, _options.EnforcementMode);
             TrackTrajectoryFingerprint(intent, risk.TrajectoryFingerprint);
 
-            if (risk.Decision == "allow")
+            if (enforced.AppliedDecision == "allow")
             {
                 if (!TryConsumeLimit($"rate:validation-token:email:{intent.EmailHash}", MaxValidationTokensPerEmail, AbuseWindow) ||
                     !TryConsumeOptionalLimit($"rate:validation-token:ip:{context.IpHash}", MaxValidationTokensPerIp, AbuseWindow) ||
@@ -376,6 +555,8 @@ public sealed class BookingFlowStore
 
                 intent.RiskScore = Math.Max(intent.RiskScore, risk.Score);
                 var token = SecurityHelpers.NewToken("vt");
+                var pressure = GetSlotPressureLevel(DefaultSlotGroup);
+                var tokenTtl = ValidationTokenTtlForPressure(pressure);
                 var grant = new ValidationGrant
                 {
                     Token = token,
@@ -385,32 +566,36 @@ public sealed class BookingFlowStore
                     IpHash = context.IpHash,
                     DeviceHash = context.DeviceHash,
                     CreatedAt = now,
-                    ExpiresAt = now.Add(ValidationTokenTtl)
+                    ExpiresAt = now.Add(tokenTtl),
+                    PressureLevel = pressure,
+                    MaxAvailabilityRequests = MaxAvailabilityRequestsForPressure(pressure)
                 };
 
-                _cache.Set(ValidationGrantKey(token), grant, ValidationTokenTtl);
+                _cache.Set(ValidationGrantKey(token), grant, tokenTtl);
+                _cache.SetIfNotExists(ValidationConsumeKey(token), new CacheReference(token), tokenTtl);
                 intent.Status = BookingIntentStatus.SlotSelectionAllowed;
                 intent.ChallengePassedAt = now;
                 SaveIntent(intent);
+                RecordSlotPressureSignal(DefaultSlotGroup, "validation-token", intent, challenge.Id, context, risk);
 
-                Audit("challenge_verified", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Validation token issued.", context, risk.Signals);
-                Audit("validation_token_issued", intent, challenge.Id, risk.Bucket, risk.Score, "allow", "Short-lived booking validation token issued.", context, risk.Signals);
+                Audit("challenge_verified", intent, challenge.Id, risk.Bucket, risk.Score, enforced.AppliedDecision, "Validation token issued.", context, risk.Signals, enforced);
+                Audit("validation_token_issued", intent, challenge.Id, risk.Bucket, risk.Score, enforced.AppliedDecision, "Short-lived booking validation token issued.", context, risk.Signals, enforced);
                 return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                     "allow",
                     token,
-                    (int)ValidationTokenTtl.TotalSeconds,
+                    (int)tokenTtl.TotalSeconds,
                     null,
                     null));
             }
 
-            if (risk.Decision == "retry_challenge")
+            if (enforced.AppliedDecision == "retry_challenge")
             {
                 // ChallengeFailCount already carries the failed-attempt history. Persisting the full
                 // per-attempt score here would make one bad drag poison the next fresh challenge.
                 intent.ChallengeFailCount++;
                 intent.Status = BookingIntentStatus.EmailConfirmed;
                 SaveIntent(intent);
-                Audit("challenge_failed", intent, challenge.Id, risk.Bucket, risk.Score, "retry_challenge", "Challenge failed or risk was uncertain.", context, risk.Signals);
+                Audit("challenge_failed", intent, challenge.Id, risk.Bucket, risk.Score, enforced.AppliedDecision, "Challenge failed or risk was uncertain.", context, risk.Signals, enforced);
                 return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
                     "retry_challenge",
                     null,
@@ -420,16 +605,16 @@ public sealed class BookingFlowStore
             }
 
             intent.ChallengeFailCount++;
-            intent.Status = risk.Decision == "hard_denied"
+            intent.Status = enforced.AppliedDecision == "hard_denied"
                 ? BookingIntentStatus.HardDenied
                 : BookingIntentStatus.TemporarilyDenied;
             SaveIntent(intent);
-            Audit("risk_decision_made", intent, challenge.Id, risk.Bucket, risk.Score, risk.Decision, "Risk threshold exceeded.", context, risk.Signals);
+            Audit("risk_decision_made", intent, challenge.Id, risk.Bucket, risk.Score, enforced.AppliedDecision, "Risk threshold exceeded.", context, risk.Signals, enforced);
             return StoreResult<ChallengeVerifyResult>.Ok(new ChallengeVerifyResult(
-                risk.Decision,
+                enforced.AppliedDecision,
                 null,
                 null,
-                risk.Decision == "hard_denied" ? null : 600,
+                enforced.AppliedDecision == "hard_denied" ? null : 600,
                 risk.ReasonCode));
         }
     }
@@ -447,11 +632,52 @@ public sealed class BookingFlowStore
 
         lock (_cache.SyncRoot)
         {
+            var grant = grantResult.Value!;
+            if (!TryGetIntent(grant.IntentId, out var intent))
+            {
+                return StoreResult<IReadOnlyList<BookingSlot>>.Fail("invalid_state");
+            }
+
+            var requestedGroup = NormalizeSlotGroup(request.SlotGroup);
+            if (grant.SlotGroup is null)
+            {
+                // Bind the token to the first queried slot group. This prevents a
+                // single challenge pass from becoming a short-lived scraper token
+                // across unrelated scarce inventories.
+                grant.SlotGroup = requestedGroup;
+            }
+            else if (!string.Equals(grant.SlotGroup, requestedGroup, StringComparison.Ordinal))
+            {
+                return StoreResult<IReadOnlyList<BookingSlot>>.Fail("slot_group_mismatch");
+            }
+
+            grant.AvailabilityRequestCount++;
+            if (grant.AvailabilityRequestCount > grant.MaxAvailabilityRequests)
+            {
+                return StoreResult<IReadOnlyList<BookingSlot>>.Fail("slot_pressure_cooldown");
+            }
+
+            var pressure = GetSlotPressureLevel(requestedGroup);
+            if (pressure == SlotPressureLevel.Critical && intent.RiskScore >= 75)
+            {
+                Audit("slot_group_under_attack", intent, null, Bucket(intent.RiskScore), intent.RiskScore, "slot_pressure_cooldown", $"Critical pressure cooldown for {requestedGroup}.", context);
+                return StoreResult<IReadOnlyList<BookingSlot>>.Fail("slot_pressure_cooldown");
+            }
+
+            _cache.Set(ValidationGrantKey(grant.Token), grant, RemainingTtl(grant.ExpiresAt, _clock.GetUtcNow()));
+            RecordSlotPressureSignal(requestedGroup, "slots-available", intent, null, context, null);
+
             var slots = GetSlotsLocked()
+                .Where(slot => string.Equals(slot.SlotGroup, requestedGroup, StringComparison.Ordinal))
                 .Where(slot => !slot.IsBooked)
                 .OrderBy(slot => slot.Date)
                 .ThenBy(slot => slot.Time)
                 .ToArray();
+
+            if (pressure >= SlotPressureLevel.High)
+            {
+                slots = slots.Take(4).ToArray();
+            }
 
             return StoreResult<IReadOnlyList<BookingSlot>>.Ok(slots);
         }
@@ -495,8 +721,19 @@ public sealed class BookingFlowStore
             if (!TryConsumeLimit($"rate:slot-group:{slot.SlotGroup}", MaxSlotGroupFinalizationsPerWindow, SlotPressureWindow) ||
                 !TryConsumeLimit($"rate:slot:{slot.Id}", MaxSingleSlotFinalizationsPerWindow, SlotPressureWindow))
             {
+                RecordSlotPressureSignal(slot.SlotGroup, "failed-finalize", intent, null, context, null);
                 Audit("rate_limit_triggered", intent, null, Bucket(intent.RiskScore), intent.RiskScore, "slot_pressure_cooldown", $"Slot pressure limit reached for {slot.SlotGroup}.", context);
                 return StoreResult<FinalizedBooking>.Fail("slot_pressure_cooldown");
+            }
+
+            if (!string.Equals(grant.SlotGroup ?? slot.SlotGroup, slot.SlotGroup, StringComparison.Ordinal))
+            {
+                return StoreResult<FinalizedBooking>.Fail("slot_group_mismatch");
+            }
+
+            if (!_cache.TryConsumeOnce(ValidationConsumeKey(grant.Token)))
+            {
+                return StoreResult<FinalizedBooking>.Fail("validation_token_expired_or_used");
             }
 
             grant.Used = true;
@@ -508,6 +745,7 @@ public sealed class BookingFlowStore
             _cache.Set(SlotsKey, GetSlotsLocked());
 
             var booking = new FinalizedBooking($"bk_{Guid.NewGuid():N}"[..15], slot);
+            RecordSlotPressureSignal(slot.SlotGroup, "finalize", intent, null, context, null);
             Audit("booking_finalized", intent, null, Bucket(intent.RiskScore), intent.RiskScore, "booked", $"Slot {slot.Id} finalized.", context);
             return StoreResult<FinalizedBooking>.Ok(booking);
         }
@@ -576,6 +814,11 @@ public sealed class BookingFlowStore
 
         if (consume)
         {
+            if (!_cache.TryConsumeOnce(ValidationConsumeKey(grant.Token)))
+            {
+                return StoreResult<ValidationGrant>.Fail("validation_token_expired_or_used");
+            }
+
             grant.Used = true;
             _cache.Set(ValidationGrantKey(grant.Token), grant, RemainingTtl(grant.ExpiresAt, _clock.GetUtcNow()));
         }
@@ -584,13 +827,12 @@ public sealed class BookingFlowStore
     }
 
     private StoreResult<(BookingIntent Intent, VerificationSession Session)> ResolveSession(
-        string? verificationSessionId,
         string? cookieSessionId,
         RequestSecurityContext context)
     {
         lock (_cache.SyncRoot)
         {
-            var result = ResolveSessionLocked(verificationSessionId, cookieSessionId, context);
+            var result = ResolveSessionLocked(cookieSessionId, cookieSessionId, context);
             if (!result.Success || result.Value is not { } session)
             {
                 return StoreResult<(BookingIntent Intent, VerificationSession Session)>.Fail(result.ErrorCode);
@@ -699,7 +941,7 @@ public sealed class BookingFlowStore
 
     private bool TryConsumeLimit(string key, int maxCount, TimeSpan window)
     {
-        return _cache.Increment(key, window) <= maxCount;
+        return _cache.IncrementWithExpiry(key, window) <= maxCount;
     }
 
     private bool TryConsumeOptionalLimit(string key, int maxCount, TimeSpan window)
@@ -746,7 +988,8 @@ public sealed class BookingFlowStore
         string? decision,
         string? message,
         RequestSecurityContext context,
-        IReadOnlyList<string>? riskSignals = null)
+        IReadOnlyList<string>? riskSignals = null,
+        AppliedRiskDecision? appliedRiskDecision = null)
     {
         var auditEvent = new AuditEvent
         {
@@ -758,6 +1001,9 @@ public sealed class BookingFlowStore
             RiskBucket = riskBucket,
             RiskScore = riskScore,
             Decision = decision,
+            AppliedDecision = appliedRiskDecision?.AppliedDecision ?? decision,
+            WouldHaveDecision = appliedRiskDecision?.WouldHaveDecision,
+            EnforcementMode = appliedRiskDecision?.EnforcementMode.ToString(),
             IpHash = context.IpHash,
             SubnetHash = context.SubnetHash,
             DeviceHash = context.DeviceHash,
@@ -781,6 +1027,122 @@ public sealed class BookingFlowStore
             riskBucket,
             riskScore,
             decision);
+    }
+
+    private SlotPressureLevel GetSlotPressureLevel(string slotGroup)
+    {
+        var snapshot = _cache.Get<SlotPressureSnapshot>(SlotPressureKey(slotGroup));
+        return snapshot is not null && snapshot.ExpiresAt > _clock.GetUtcNow()
+            ? snapshot.Level
+            : SlotPressureLevel.Normal;
+    }
+
+    private void RecordSlotPressureSignal(
+        string slotGroup,
+        string signal,
+        BookingIntent? intent,
+        string? challengeId,
+        RequestSecurityContext context,
+        RiskAssessment? risk)
+    {
+        var weight = signal switch
+        {
+            "validation-token" => 1,
+            "slots-available" => 1,
+            "finalize" => 2,
+            "failed-finalize" => 3,
+            _ => 1
+        };
+
+        var count = 0L;
+        for (var index = 0; index < weight; index++)
+        {
+            count = _cache.IncrementWithExpiry($"pressure:{slotGroup}:score", SlotPressureWindow);
+        }
+
+        var level = count switch
+        {
+            >= 26 => SlotPressureLevel.Critical,
+            >= 16 => SlotPressureLevel.High,
+            >= 9 => SlotPressureLevel.Elevated,
+            _ => SlotPressureLevel.Normal
+        };
+
+        var now = _clock.GetUtcNow();
+        _cache.Set(SlotPressureKey(slotGroup), new SlotPressureSnapshot
+        {
+            SlotGroup = slotGroup,
+            Level = level,
+            UpdatedAt = now,
+            ExpiresAt = now.Add(SlotPressureSnapshotTtl)
+        }, SlotPressureSnapshotTtl);
+
+        if (level >= SlotPressureLevel.High)
+        {
+            Audit(
+                "slot_group_under_attack",
+                intent,
+                challengeId,
+                risk?.Bucket ?? Bucket(intent?.RiskScore ?? 0),
+                risk?.Score ?? intent?.RiskScore,
+                "slot_pressure_observed",
+                $"{slotGroup} pressure is {level}.",
+                context,
+                risk?.Signals);
+        }
+    }
+
+    private static TimeSpan ValidationTokenTtlForPressure(SlotPressureLevel pressure)
+    {
+        return pressure switch
+        {
+            SlotPressureLevel.Elevated => TimeSpan.FromMinutes(2),
+            SlotPressureLevel.High => TimeSpan.FromSeconds(90),
+            SlotPressureLevel.Critical => TimeSpan.FromSeconds(60),
+            _ => ValidationTokenTtl
+        };
+    }
+
+    private static int MaxAvailabilityRequestsForPressure(SlotPressureLevel pressure)
+    {
+        return pressure switch
+        {
+            SlotPressureLevel.Elevated => 3,
+            SlotPressureLevel.High => 2,
+            SlotPressureLevel.Critical => 1,
+            _ => 4
+        };
+    }
+
+    private static int EffectiveTargetX(ChallengeSession challenge)
+    {
+        return challenge.Variant == ChallengeVariants.FollowUpShift
+            ? challenge.FollowUpTargetX
+            : challenge.TargetX;
+    }
+
+    private static string NormalizeAssetPhase(string kind, string? phase)
+    {
+        if (kind == "piece")
+        {
+            return "piece";
+        }
+
+        return string.IsNullOrWhiteSpace(phase)
+            ? "preview"
+            : phase.Trim().ToLowerInvariant() switch
+            {
+                "active" => "active",
+                "follow_up" => "follow_up",
+                _ => "preview"
+            };
+    }
+
+    private static string NormalizeSlotGroup(string? slotGroup)
+    {
+        return string.IsNullOrWhiteSpace(slotGroup)
+            ? DefaultSlotGroup
+            : slotGroup.Trim().ToLowerInvariant();
     }
 
     private static List<BookingSlot> SeedSlots()
@@ -834,7 +1196,15 @@ public sealed class BookingFlowStore
 
     private static string ChallengeKey(string challengeId) => $"challenge:{challengeId}";
 
+    private static string ChallengeConsumeKey(string challengeId) => $"once:challenge:{challengeId}";
+
     private static string ValidationGrantKey(string token) => $"validation:{token}";
+
+    private static string ValidationConsumeKey(string token) => $"once:validation:{token}";
+
+    private static string AssetTokenKey(string token) => $"asset-token:{token}";
+
+    private static string SlotPressureKey(string slotGroup) => $"slot-pressure:{slotGroup}";
 
     private static string Bucket(int risk) => risk switch
     {

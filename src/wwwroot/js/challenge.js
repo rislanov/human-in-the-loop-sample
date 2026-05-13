@@ -32,7 +32,6 @@
   // These values are intentionally short-lived. Reloading the page must go back
   // through the server-owned email-ticket/session/challenge state instead of
   // preserving privileged client state.
-  let verificationSessionId = "";
   let validationToken = "";
   let challengeId = "";
   let challengeConfig = null;
@@ -92,8 +91,6 @@
         ticket,
         browser: window.bookingApi.browserSignals()
       });
-      verificationSessionId = confirmed.verification_session_id;
-
       // The HttpOnly cookie stores the session id; the nonce header adds a
       // script-visible value that same-site API calls must also provide.
       window.bookingApi.setSessionNonce(confirmed.session_nonce);
@@ -115,7 +112,6 @@
 
     try {
       const response = await window.bookingApi.postJson("/api/v1/challenge/init", {
-        verification_session_id: verificationSessionId,
         browser: window.bookingApi.browserSignals()
       });
 
@@ -176,6 +172,10 @@
       lastMeaningfulMoveAt: startedAt,
       activationTimer: 0,
       lifecyclePromise: null,
+      followUpPromise: null,
+      followUpAt: 0,
+      followUpNonce: "",
+      lastFollowUpMoveAt: 0,
       modality: event.pointerType || "mouse",
       points: []
     };
@@ -249,6 +249,55 @@
     if (activeBackgroundUrl) {
       background.src = cacheBust(activeBackgroundUrl);
     }
+
+    if (challengeConfig.variant === "follow_up_shift") {
+      challengeStatus.textContent = "Keep adjusting until the image matches.";
+      drag.followUpPromise = beginFollowUpLifecycle(pointerId);
+    }
+  }
+
+  async function beginFollowUpLifecycle(pointerId) {
+    if (!drag || drag.pointerId !== pointerId) {
+      return;
+    }
+
+    try {
+      // Follow-up is a second server-side lifecycle mark. It means the browser
+      // stayed interactive after the active image appeared instead of solving one
+      // downloaded frame offline and immediately posting /verify.
+      const response = await window.bookingApi.postJson("/api/v1/challenge/follow-up", {
+        challenge_id: challengeId,
+        phase_nonce: drag.phaseNonce,
+        browser: window.bookingApi.browserSignals()
+      });
+
+      if (response.ui_config) {
+        challengeConfig = response.ui_config;
+      }
+
+      const delay = Math.max(0, Number(response.follow_up_delay_ms ?? challengeConfig.follow_up_delay_ms ?? 0));
+      window.setTimeout(() => {
+        if (!drag || drag.pointerId !== pointerId) {
+          return;
+        }
+
+        drag.followUpNonce = response.follow_up_nonce || "";
+        drag.followUpAt = performance.now();
+        drag.lastFollowUpMoveAt = drag.followUpAt;
+        drag.interactionPhase = "follow_up";
+
+        // The visual target changes again here. The server will validate against
+        // this final target and require movement after this state appears.
+        if (response.follow_up_background_image_url) {
+          background.src = cacheBust(response.follow_up_background_image_url);
+        }
+      }, delay);
+    } catch (error) {
+      if (drag && drag.pointerId === pointerId) {
+        telemetryEvents.pointer_cancelled = true;
+        challengeStatus.textContent = readableError(error.message);
+      }
+    }
   }
 
   function moveDrag(event) {
@@ -268,6 +317,9 @@
     // reset the hold timer on every sub-pixel movement.
     if (Math.abs(event.clientX - drag.lastClientX) + Math.abs(event.clientY - drag.lastClientY) >= 3) {
       drag.lastMeaningfulMoveAt = performance.now();
+      if (drag.interactionPhase === "follow_up") {
+        drag.lastFollowUpMoveAt = drag.lastMeaningfulMoveAt;
+      }
       drag.lastClientX = event.clientX;
       drag.lastClientY = event.clientY;
     }
@@ -322,6 +374,9 @@
     const activeElapsedMs = finishedDrag.activeAt > 0
       ? Math.max(0, Math.round(releasedAt - finishedDrag.activeAt))
       : 0;
+    const followUpElapsedMs = finishedDrag.followUpAt > 0
+      ? Math.max(0, Math.round(releasedAt - finishedDrag.followUpAt))
+      : 0;
 
     // Hold time is measured from the last meaningful movement, not from pointer
     // down. This makes hold_and_release verify that the user paused after final
@@ -334,6 +389,9 @@
     // automatically fatal.
     const lastAdjustmentMs = finishedDrag.activeAt > 0
       ? Math.max(0, Math.round(finishedDrag.lastMeaningfulMoveAt - finishedDrag.activeAt))
+      : 0;
+    const lastFollowUpAdjustmentMs = finishedDrag.followUpAt > 0
+      ? Math.max(0, Math.round(finishedDrag.lastFollowUpMoveAt - finishedDrag.followUpAt))
       : 0;
     challengeStatus.textContent = "Checking...";
     handle.disabled = true;
@@ -348,10 +406,13 @@
           x: solutionX,
           time_spent_ms: timeSpentMs,
           phase_nonce: finishedDrag.phaseNonce,
+          follow_up_nonce: finishedDrag.followUpNonce,
           interaction_phase: finishedDrag.interactionPhase,
           active_elapsed_ms: activeElapsedMs,
+          follow_up_elapsed_ms: followUpElapsedMs,
           hold_ms: holdMs,
-          last_adjustment_ms: lastAdjustmentMs
+          last_adjustment_ms: lastAdjustmentMs,
+          last_follow_up_adjustment_ms: lastFollowUpAdjustmentMs
         },
         telemetry: {
           modality: finishedDrag.modality,
@@ -401,6 +462,7 @@
     // booking form or from an unverified email confirmation.
     const response = await window.bookingApi.postJson("/api/v1/slots/available", {
       validation_token: validationToken,
+      slot_group: "serbian-permit-july-2026",
       browser: window.bookingApi.browserSignals()
     });
 
@@ -472,6 +534,7 @@
     handle.style.width = `${challengeConfig.handle_size || 54}px`;
     handle.style.height = `${challengeConfig.handle_size || 54}px`;
     track.classList.toggle("shift-mode", challengeConfig.variant === "shift_after_start");
+    track.classList.toggle("follow-up-mode", challengeConfig.variant === "follow_up_shift");
     track.classList.toggle("hold-mode", false);
     track.classList.remove("active-phase");
   }
@@ -485,6 +548,7 @@
     handle.disabled = false;
     track.classList.remove("active-phase");
     track.classList.remove("hold-mode");
+    track.classList.remove("follow-up-mode");
     applySliderRatio(currentRatio);
   }
 
@@ -524,7 +588,7 @@
     const x = Math.round((currentRatio * metrics.pieceMax * metrics.scale) + pieceOffsetX);
     const y = Math.round((event.clientY - frameRect.top) * metrics.scale);
     const t = Math.round(performance.now() - drag.startedAt);
-    const state = drag.activeAt > 0 ? "active" : "pre_active";
+    const state = drag.interactionPhase || (drag.activeAt > 0 ? "active" : "pre_active");
 
     if (drag.points.length < 80) {
       // Cap points before sending them to the server. The risk engine needs the
@@ -584,9 +648,11 @@
       missing_session_nonce: "Booking session could not be verified.",
       invalid_session_nonce: "Booking session could not be verified.",
       device_mismatch: "Booking session could not be restored on this device.",
+      asset_forbidden: "Challenge expired.",
       missing_validation_token: "Slot selection token is missing.",
       invalid_validation_token: "Slot selection token is invalid or expired.",
       validation_token_expired_or_used: "Slot selection token is invalid or expired.",
+      slot_group_mismatch: "Slot selection token is invalid or expired.",
       slot_unavailable: "This slot is no longer available.",
       slot_pressure_cooldown: "This slot group is busy. Try again shortly."
     };

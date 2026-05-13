@@ -712,6 +712,10 @@ input {
     margin-bottom: 26px;
   }
 
+  .control-with-addon.compact {
+    width: min(480px, 100%);
+  }
+
   .slot-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -733,6 +737,22 @@ input {
 
   .step strong {
     max-width: 74px;
+  }
+
+  .time-filter {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .time-filter label,
+  .time-filter strong {
+    text-align: center;
+  }
+
+  .control-with-addon.compact {
+    grid-template-columns: minmax(0, 1fr) 50px;
+    width: 100%;
   }
 
   .slot-grid {

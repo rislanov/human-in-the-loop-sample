@@ -71,7 +71,19 @@ public sealed class ValidationGrant
     public string? DeviceHash { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
+    public string? SlotGroup { get; set; }
+    public SlotPressureLevel PressureLevel { get; init; } = SlotPressureLevel.Normal;
+    public int MaxAvailabilityRequests { get; init; } = 4;
+    public int AvailabilityRequestCount { get; set; }
     public bool Used { get; set; }
+}
+
+public enum SlotPressureLevel
+{
+    Normal,
+    Elevated,
+    High,
+    Critical
 }
 
 public sealed class BookingSlot
@@ -93,6 +105,9 @@ public sealed class AuditEvent
     public string? RiskBucket { get; init; }
     public int? RiskScore { get; init; }
     public string? Decision { get; init; }
+    public string? AppliedDecision { get; init; }
+    public string? WouldHaveDecision { get; init; }
+    public string? EnforcementMode { get; init; }
     public string? IpHash { get; init; }
     public string? SubnetHash { get; init; }
     public string? DeviceHash { get; init; }
@@ -123,6 +138,7 @@ public sealed class ConfirmEmailRequest
 public sealed class AvailableSlotsRequest
 {
     public string? ValidationToken { get; init; }
+    public string? SlotGroup { get; init; }
     public BrowserSignals? Browser { get; init; }
 }
 
@@ -150,6 +166,24 @@ public sealed record ChallengeVerifyResult(
 public sealed record FinalizedBooking(string BookingId, BookingSlot Slot);
 
 public sealed record CacheReference(string Value);
+
+public sealed class AssetTokenGrant
+{
+    public required string Token { get; init; }
+    public required string ChallengeId { get; init; }
+    public required string VerificationSessionId { get; init; }
+    public required string Phase { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+}
+
+public sealed class SlotPressureSnapshot
+{
+    public required string SlotGroup { get; init; }
+    public required SlotPressureLevel Level { get; init; }
+    public required DateTimeOffset UpdatedAt { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+}
 
 public sealed record RequestSecurityContext(
     string? IpHash,

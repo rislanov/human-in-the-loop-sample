@@ -16,6 +16,8 @@ public sealed class ChallengeAssetRenderer : IChallengeAssetRenderer
         var canvas = new PixelCanvas(challenge.Width, challenge.Height);
         var active = string.Equals(phase, "active", StringComparison.OrdinalIgnoreCase) &&
             challenge.StartedAt is not null;
+        var followUp = string.Equals(phase, "follow_up", StringComparison.OrdinalIgnoreCase) &&
+            challenge.FollowUpNonce is not null;
 
         canvas.Clear(palette.Wash);
         canvas.FillVerticalGradient(palette.Light, palette.Wash);
@@ -26,11 +28,17 @@ public sealed class ChallengeAssetRenderer : IChallengeAssetRenderer
         canvas.StrokeLine(18, 136, 342, 122, 12, palette.Navy.WithAlpha(58));
         canvas.StrokeLine(24, 78, 344, 69, 8, Rgba.White.WithAlpha(112));
 
-        if (active)
+        if (followUp && challenge.Variant == ChallengeVariants.FollowUpShift)
+        {
+            // The follow-up frame is the final visual state. Solvers that only look
+            // at the first active image will align to the wrong target.
+            DrawTarget(canvas, challenge.FollowUpTargetX, challenge.PieceY, palette, strong: true);
+        }
+        else if (active)
         {
             DrawTarget(canvas, challenge.TargetX, challenge.PieceY, palette, strong: true);
         }
-        else if (challenge.Variant == ChallengeVariants.ShiftAfterStart)
+        else if (challenge.Variant is ChallengeVariants.ShiftAfterStart or ChallengeVariants.FollowUpShift)
         {
             // Before pointerdown the user sees only a plausible preview target. The
             // real target appears after the server records the interaction start.

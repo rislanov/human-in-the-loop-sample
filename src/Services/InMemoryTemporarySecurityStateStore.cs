@@ -1,19 +1,40 @@
 namespace HumanLoopBooking.Services;
 
-public sealed class InMemoryDistributedCacheService : IDistributedCacheService
+// Demo-only process-local implementation of ITemporarySecurityStateStore. It is
+// intentionally written with the same operation names a Redis adapter should
+// expose, so the booking flow depends on security semantics rather than on a
+// vague "cache" abstraction. Replace this class with Redis before running more
+// than one app instance.
+public sealed class InMemoryTemporarySecurityStateStore : ITemporarySecurityStateStore
 {
     private readonly object _gate = new();
     private readonly TimeProvider _clock;
     private readonly Dictionary<string, CacheEntry> _entries = [];
 
-    public InMemoryDistributedCacheService(TimeProvider clock)
+    public InMemoryTemporarySecurityStateStore(TimeProvider clock)
     {
         _clock = clock;
     }
 
-    // Demo-only process-local lock. A Redis implementation should replace this
-    // with atomic commands, transactions, or Lua scripts around multi-key updates.
+    // Compound demo workflows still use a process-local lock. A Redis-backed
+    // store should replace multi-key critical sections with Lua scripts or
+    // transactions, while preserving the single-key primitives below.
     public object SyncRoot => _gate;
+
+    public bool SetIfNotExists<T>(string key, T value, TimeSpan ttl) where T : class
+    {
+        lock (_gate)
+        {
+            CleanupExpired();
+            if (_entries.ContainsKey(key))
+            {
+                return false;
+            }
+
+            _entries[key] = new CacheEntry(value, _clock.GetUtcNow().Add(ttl));
+            return true;
+        }
+    }
 
     public bool TryGet<T>(string key, out T? value) where T : class
     {
@@ -41,15 +62,37 @@ public sealed class InMemoryDistributedCacheService : IDistributedCacheService
         }
     }
 
-    public void Remove(string key)
+    public bool CompareAndSet<T>(string key, T expected, T value, TimeSpan ttl) where T : class
     {
         lock (_gate)
         {
-            _entries.Remove(key);
+            CleanupExpired();
+            if (!_entries.TryGetValue(key, out var entry) || !ReferenceEquals(entry.Value, expected))
+            {
+                return false;
+            }
+
+            _entries[key] = new CacheEntry(value, _clock.GetUtcNow().Add(ttl));
+            return true;
         }
     }
 
-    public long Increment(string key, TimeSpan ttl)
+    public bool TryConsumeOnce(string key)
+    {
+        lock (_gate)
+        {
+            CleanupExpired();
+            if (!_entries.ContainsKey(key))
+            {
+                return false;
+            }
+
+            _entries.Remove(key);
+            return true;
+        }
+    }
+
+    public long IncrementWithExpiry(string key, TimeSpan ttl)
     {
         lock (_gate)
         {
@@ -64,9 +107,19 @@ public sealed class InMemoryDistributedCacheService : IDistributedCacheService
                 expiresAt = entry.ExpiresAt ?? expiresAt;
             }
 
-            // Mirrors Redis INCR + first-write EXPIRE behavior closely enough for the sample.
+            // Mirrors Redis INCR with first-write EXPIRE. Production Redis code
+            // should make the increment and expiry creation atomic with Lua or a
+            // transaction to avoid immortal rate-limit keys.
             _entries[key] = new CacheEntry(new CounterValue(next), expiresAt);
             return next;
+        }
+    }
+
+    public bool Delete(string key)
+    {
+        lock (_gate)
+        {
+            return _entries.Remove(key);
         }
     }
 

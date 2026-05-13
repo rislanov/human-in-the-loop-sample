@@ -7,12 +7,13 @@ public static class ChallengeVariants
     public const string RevealTarget = "reveal_target";
     public const string ShiftAfterStart = "shift_after_start";
     public const string HoldAndRelease = "hold_and_release";
+    public const string FollowUpShift = "follow_up_shift";
 }
 
 // Server-owned challenge state. The sensitive fields (TargetX, tolerance,
 // PhaseNonce, timestamps) must stay server-side; only RenderUiConfig and asset
 // URLs are sent to the browser.
-public sealed class ChallengeSession
+public sealed record class ChallengeSession
 {
     public required string Id { get; init; }
     public required Guid IntentId { get; init; }
@@ -32,15 +33,19 @@ public sealed class ChallengeSession
     public int StripeOffset { get; init; }
     public int ActivationDelayMs { get; init; } = 280;
     public int HoldRequirementMs { get; init; }
+    public int FollowUpTargetX { get; init; }
+    public int FollowUpDelayMs { get; init; }
+    public int RequiredPostFollowUpAdjustmentPx { get; init; }
     public string? PhaseNonce { get; set; }
+    public string? FollowUpNonce { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? ActivatedAt { get; set; }
+    public DateTimeOffset? FollowUpActivatedAt { get; set; }
     public bool Consumed { get; set; }
 }
 
 public sealed class InitChallengeRequest
 {
-    public string? VerificationSessionId { get; init; }
     public BrowserSignals? Browser { get; init; }
 }
 
@@ -50,7 +55,14 @@ public sealed class StartChallengeRequest
     public BrowserSignals? Browser { get; init; }
 }
 
-public sealed class VerifyChallengeRequest
+public sealed class FollowUpChallengeRequest
+{
+    public string? ChallengeId { get; init; }
+    public string? PhaseNonce { get; init; }
+    public BrowserSignals? Browser { get; init; }
+}
+
+public sealed record class VerifyChallengeRequest
 {
     public string? ChallengeId { get; init; }
     public ChallengeSolution? Solution { get; init; }
@@ -60,15 +72,18 @@ public sealed class VerifyChallengeRequest
 
 // Client-submitted solution metadata. These fields are not trusted as truth; the
 // protocol validator and risk engine use them as consistency signals.
-public sealed class ChallengeSolution
+public sealed record class ChallengeSolution
 {
     public int X { get; init; }
     public int TimeSpentMs { get; init; }
     public string? PhaseNonce { get; init; }
+    public string? FollowUpNonce { get; init; }
     public string? InteractionPhase { get; init; }
     public int ActiveElapsedMs { get; init; }
+    public int FollowUpElapsedMs { get; init; }
     public int HoldMs { get; init; }
     public int LastAdjustmentMs { get; init; }
+    public int LastFollowUpAdjustmentMs { get; init; }
 }
 
 public sealed class ChallengeTelemetry
@@ -113,4 +128,5 @@ public sealed record RenderUiConfig(
     int StripeOffset,
     int ActivationDelayMs,
     string Variant,
-    int HoldRequirementMs);
+    int HoldRequirementMs,
+    int FollowUpDelayMs);

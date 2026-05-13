@@ -17,7 +17,7 @@ public sealed class FormTelemetry
 // Browser hints are cheap to spoof, so they are scored only as weak signals.
 // The goal is to catch commodity automation patterns without overfitting to one
 // browser fingerprint.
-public sealed class BrowserSignals
+public sealed record class BrowserSignals
 {
     public bool WebDriver { get; init; }
     public int PluginsLength { get; init; }

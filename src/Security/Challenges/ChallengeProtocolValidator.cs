@@ -44,10 +44,15 @@ public sealed class ChallengeProtocolValidator : IChallengeProtocolValidator
         // The active phase begins after the server-recorded start and a short
         // randomized delay. Releasing before this phase defeats the dynamic visual
         // part of the challenge and is therefore treated as protocol failure.
-        if (!string.Equals(solution.InteractionPhase, "active", StringComparison.OrdinalIgnoreCase))
+        var expectedReleasePhase = challenge.Variant == ChallengeVariants.FollowUpShift
+            ? "follow_up"
+            : "active";
+        if (!string.Equals(solution.InteractionPhase, expectedReleasePhase, StringComparison.OrdinalIgnoreCase))
         {
             satisfied = false;
-            AddRisk(14, "released_before_active_phase");
+            AddRisk(14, challenge.Variant == ChallengeVariants.FollowUpShift
+                ? "released_before_follow_up_phase"
+                : "released_before_active_phase");
         }
 
         if (solution.ActiveElapsedMs <= 0)
@@ -87,18 +92,66 @@ public sealed class ChallengeProtocolValidator : IChallengeProtocolValidator
             AddRisk(14, "missing_post_reveal_adjustment");
         }
 
+        if (challenge.Variant == ChallengeVariants.FollowUpShift)
+        {
+            // Follow-up validation makes the challenge interactive after the first
+            // target reveal. A correct final X is not enough: the server must also
+            // see that the browser requested the follow-up phase and moved after it.
+            if (challenge.FollowUpActivatedAt is null || string.IsNullOrWhiteSpace(challenge.FollowUpNonce))
+            {
+                satisfied = false;
+                AddRisk(22, "follow_up_not_started");
+            }
+
+            if (!string.Equals(solution.FollowUpNonce, challenge.FollowUpNonce, StringComparison.Ordinal))
+            {
+                satisfied = false;
+                AddRisk(22, "follow_up_nonce_mismatch");
+            }
+
+            if (solution.FollowUpElapsedMs <= 0)
+            {
+                satisfied = false;
+                AddRisk(14, "missing_follow_up_elapsed");
+            }
+            else if (solution.FollowUpElapsedMs < 120)
+            {
+                satisfied = false;
+                AddRisk(10, "follow_up_phase_too_short");
+            }
+
+            if (!HasStateAdjustment(telemetry, "follow_up", challenge.RequiredPostFollowUpAdjustmentPx))
+            {
+                satisfied = false;
+                AddRisk(18, "missing_post_follow_up_adjustment");
+            }
+        }
+
         if (solution.LastAdjustmentMs > 0 &&
             solution.ActiveElapsedMs > 0 &&
             solution.LastAdjustmentMs + 350 < solution.ActiveElapsedMs &&
-            challenge.Variant != ChallengeVariants.HoldAndRelease)
+            challenge.Variant is not (ChallengeVariants.HoldAndRelease or ChallengeVariants.FollowUpShift))
         {
             AddRisk(4, "stale_final_adjustment");
+        }
+
+        if (challenge.Variant == ChallengeVariants.FollowUpShift &&
+            solution.LastFollowUpAdjustmentMs > 0 &&
+            solution.FollowUpElapsedMs > 0 &&
+            solution.LastFollowUpAdjustmentMs + 350 < solution.FollowUpElapsedMs)
+        {
+            AddRisk(5, "stale_follow_up_adjustment");
         }
 
         return new ChallengeProtocolAssessment(satisfied, risk, signals);
     }
 
     private static bool HasActiveAdjustment(ChallengeTelemetry? telemetry)
+    {
+        return HasStateAdjustment(telemetry, "active", 8);
+    }
+
+    private static bool HasStateAdjustment(ChallengeTelemetry? telemetry, string state, int requiredSpan)
     {
         if (telemetry is null)
         {
@@ -107,7 +160,7 @@ public sealed class ChallengeProtocolValidator : IChallengeProtocolValidator
 
         var activeMoves = telemetry.Points
             .Where(point =>
-                string.Equals(point.State, "active", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(point.State, state, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(point.Phase, "down", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
@@ -117,6 +170,6 @@ public sealed class ChallengeProtocolValidator : IChallengeProtocolValidator
         }
 
         var activeXSpan = activeMoves.Max(point => point.X) - activeMoves.Min(point => point.X);
-        return activeXSpan >= 8;
+        return activeXSpan >= Math.Max(1, requiredSpan);
     }
 }
